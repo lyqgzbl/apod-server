@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,10 +22,92 @@ type RedisStore struct {
 	openWindow time.Duration
 }
 
+var (
+	redisClientLogMu         sync.Mutex
+	redisClientLogLast       time.Time
+	redisClientLogSuppressed int
+)
+
+type redisZapLogger struct{}
+
+func (redisZapLogger) Printf(ctx context.Context, format string, v ...interface{}) {
+	detail := sanitizeRedisLogDetail(fmt.Sprintf(format, v...))
+	if detail == "" {
+		return
+	}
+	emit, suppressed := allowRedisClientLog()
+	if !emit {
+		return
+	}
+
+	l := loggerFromCtx(ctx).With(zap.String("component", "redis"))
+	fields := []zap.Field{zap.String("detail", detail)}
+	if suppressed > 0 {
+		fields = append(fields, zap.Int("suppressed", suppressed))
+	}
+
+	if isRedisConnectivityNoise(detail) {
+		l.Warn("redis client log", fields...)
+		return
+	}
+	l.Error("redis client log", fields...)
+}
+
+func sanitizeRedisLogDetail(raw string) string {
+	detail := strings.TrimSpace(raw)
+	if detail == "" {
+		return ""
+	}
+	lower := strings.ToLower(detail)
+	if idx := strings.Index(lower, "dial tcp "); idx >= 0 {
+		return strings.TrimSpace(detail[idx:])
+	}
+
+	prefixes := []string{
+		"redis: connection pool: failed to dial after 5 attempts:",
+		"redis: connection pool:",
+		"redis:",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(strings.ToLower(detail), p) {
+			trimmed := strings.TrimSpace(detail[len(p):])
+			if trimmed != "" {
+				return trimmed
+			}
+			break
+		}
+	}
+	return detail
+}
+
+func isRedisConnectivityNoise(detail string) bool {
+	lower := strings.ToLower(detail)
+	return strings.Contains(lower, "dial tcp") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "timeout") || strings.Contains(lower, "failed to dial")
+}
+
+func allowRedisClientLog() (bool, int) {
+	const minInterval = 15 * time.Second
+
+	redisClientLogMu.Lock()
+	defer redisClientLogMu.Unlock()
+
+	now := time.Now()
+	if redisClientLogLast.IsZero() || now.Sub(redisClientLogLast) >= minInterval {
+		suppressed := redisClientLogSuppressed
+		redisClientLogSuppressed = 0
+		redisClientLogLast = now
+		return true, suppressed
+	}
+
+	redisClientLogSuppressed++
+	return false, 0
+}
+
 func NewRedisStore() *RedisStore {
 	addr := getenv("REDIS_ADDR", "127.0.0.1:6379")
 	password := getenv("REDIS_PASSWORD", "")
 	db, _ := strconv.Atoi(getenv("REDIS_DB", "0"))
+	redis.SetLogger(redisZapLogger{})
 	client := redis.NewClient(&redis.Options{Addr: addr, Password: password, DB: db})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

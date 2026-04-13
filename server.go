@@ -62,13 +62,13 @@ func apiKeyAuthMiddleware(requiredKey string) gin.HandlerFunc {
 		l := requestLogger(c)
 		provided, msg := readAPIKeyFromHeader(c)
 		if msg != "" {
-			l.Warn("auth failed", zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.String("reason", msg))
+			l.Warn("auth failed", zap.String("method", c.Request.Method), zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusUnauthorized), zap.String("reason", msg))
 			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": msg})
 			c.Abort()
 			return
 		}
 		if len(provided) != len(requiredBytes) || subtle.ConstantTimeCompare([]byte(provided), requiredBytes) != 1 {
-			l.Warn("auth failed", zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.String("reason", "invalid API key"))
+			l.Warn("auth failed", zap.String("method", c.Request.Method), zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusUnauthorized), zap.String("reason", "invalid API key"))
 			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "invalid API key"})
 			c.Abort()
 			return
@@ -120,6 +120,38 @@ func requestLogger(c *gin.Context) *zap.Logger {
 		}
 	}
 	return loggerFromCtx(c.Request.Context())
+}
+
+func accessLogMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		started := time.Now()
+		method := c.Request.Method
+		path := c.Request.URL.Path
+
+		c.Next()
+
+		status := c.Writer.Status()
+		fields := []zap.Field{
+			zap.String("method", method),
+			zap.String("path", path),
+			zap.Int("status", status),
+			zap.Duration("latency", time.Since(started)),
+			zap.String("ip", c.ClientIP()),
+		}
+		if len(c.Errors) > 0 {
+			fields = append(fields, zap.String("errors", c.Errors.String()))
+		}
+
+		l := requestLogger(c)
+		switch {
+		case status >= http.StatusInternalServerError:
+			l.Error("http_request", fields...)
+		case status >= http.StatusBadRequest:
+			l.Warn("http_request", fields...)
+		default:
+			l.Info("http_request", fields...)
+		}
+	}
 }
 
 func startPrefetchCron() {
@@ -245,7 +277,7 @@ func setupRouter() *gin.Engine {
 
 	r.Use(gzip.Gzip(gzip.DefaultCompression))
 	r.Use(traceIDMiddleware())
-	r.Use(ginzap.Ginzap(logger, time.RFC3339, true))
+	r.Use(accessLogMiddleware())
 	r.Use(ginzap.RecoveryWithZap(logger, true))
 
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
@@ -319,6 +351,8 @@ func setupRouter() *gin.Engine {
 }
 
 func runServer() error {
+	ginMode := configureGinMode()
+	logger.Info("runtime configured", zap.String("app_env", appEnv()), zap.String("gin_mode", ginMode), zap.String("log_encoding", logEncoding()))
 	registerMetrics()
 	redisStore = NewRedisStore()
 	imageStore = NewImageStore(getenv("IMAGE_CACHE_DIR", "cache/images"))
