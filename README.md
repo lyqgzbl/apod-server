@@ -131,6 +131,7 @@ NASA_API_KEY=your_api_key docker compose up -d
 
 - `APP_ENV`: 运行环境，`development` 或 `production`，默认 `development`
 - `LOG_LEVEL`: 日志级别，默认开发环境 `debug`，生产环境 `info`
+- `LOG_COLOR`: 控制台日志等级着色开关（`true/false`），默认自动检测终端
 - `NASA_API_KEY`: NASA API Key，默认 `DEMO_KEY`
 - `API_AUTH_KEY`: 业务 API 访问密钥，默认 `changeme`
 - `API_RATE_LIMIT_RPS`: API 每秒令牌速率，默认 `8`
@@ -168,6 +169,7 @@ NASA_API_KEY=your_api_key docker compose up -d
 - 生产环境（`APP_ENV=production`）：JSON Encoder，便于 ELK/Loki 等系统采集
 - 时间字段统一为 ISO8601（例如 `2026-04-14T16:15:02Z`）
 - HTTP Access Log 使用统一消息 `http_request`，并包含 `method/path/status/latency/ip/trace_id`
+- 开发控制台中的 `latency` 统一为固定宽度毫秒字符串，便于滚动扫描对齐
 
 可以关注以下指标：
 

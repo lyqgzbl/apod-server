@@ -56,6 +56,10 @@ func newAppLogger() (*zap.Logger, error) {
 		cfg = zap.NewDevelopmentConfig()
 		cfg.Encoding = "console"
 		cfg.Level = parseLogLevel(zapcore.DebugLevel)
+		cfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+		if shouldUseColorLevel() {
+			cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+		}
 		// Keep development logs readable: only panic/fatal should include long stacks.
 		cfg.DisableStacktrace = true
 	}
@@ -68,6 +72,27 @@ func newAppLogger() (*zap.Logger, error) {
 	cfg.EncoderConfig.EncodeDuration = zapcore.StringDurationEncoder
 
 	return cfg.Build()
+}
+
+func shouldUseColorLevel() bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv("LOG_COLOR")))
+	if raw != "" {
+		switch raw {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TERM")), "dumb") {
+		return false
+	}
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
 func configureGinMode() string {

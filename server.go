@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -122,6 +123,14 @@ func requestLogger(c *gin.Context) *zap.Logger {
 	return loggerFromCtx(c.Request.Context())
 }
 
+func latencyFieldForAccessLog(d time.Duration) zap.Field {
+	if logEncoding() == "console" {
+		ms := float64(d) / float64(time.Millisecond)
+		return zap.String("latency", fmt.Sprintf("%8.3fms", ms))
+	}
+	return zap.Duration("latency", d)
+}
+
 func accessLogMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		started := time.Now()
@@ -131,11 +140,12 @@ func accessLogMiddleware() gin.HandlerFunc {
 		c.Next()
 
 		status := c.Writer.Status()
+		latency := time.Since(started)
 		fields := []zap.Field{
 			zap.String("method", method),
 			zap.String("path", path),
 			zap.Int("status", status),
-			zap.Duration("latency", time.Since(started)),
+			latencyFieldForAccessLog(latency),
 			zap.String("ip", c.ClientIP()),
 		}
 		if len(c.Errors) > 0 {
