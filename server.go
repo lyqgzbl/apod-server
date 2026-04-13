@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"os"
 	"strings"
@@ -53,6 +54,49 @@ func rateLimitMiddleware(limiter *rate.Limiter) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func apiKeyAuthMiddleware(requiredKey string) gin.HandlerFunc {
+	requiredBytes := []byte(requiredKey)
+	return func(c *gin.Context) {
+		l := requestLogger(c)
+		provided, msg := readAPIKeyFromHeader(c)
+		if msg != "" {
+			l.Warn("auth failed", zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.String("reason", msg))
+			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": msg})
+			c.Abort()
+			return
+		}
+		if len(provided) != len(requiredBytes) || subtle.ConstantTimeCompare([]byte(provided), requiredBytes) != 1 {
+			l.Warn("auth failed", zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.String("reason", "invalid API key"))
+			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "invalid API key"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func readAPIKeyFromHeader(c *gin.Context) (string, string) {
+	authorization := strings.TrimSpace(c.GetHeader("Authorization"))
+	if authorization != "" {
+		parts := strings.SplitN(authorization, " ", 2)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			return "", "Authorization must use Bearer token"
+		}
+		token := strings.TrimSpace(parts[1])
+		if token == "" {
+			return "", "Bearer token is required"
+		}
+		return token, ""
+	}
+
+	apiKey := strings.TrimSpace(c.GetHeader("X-API-Key"))
+	if apiKey != "" {
+		return apiKey, ""
+	}
+
+	return "", "Authorization: Bearer <token> is required"
 }
 
 func traceIDMiddleware() gin.HandlerFunc {
@@ -179,6 +223,11 @@ func readinessHandler(c *gin.Context) {
 
 func setupRouter() *gin.Engine {
 	r := gin.New()
+	authKey := strings.TrimSpace(getenv("API_AUTH_KEY", "changeme"))
+	if authKey == "changeme" {
+		logger.Warn("using default API_AUTH_KEY, please override in production")
+	}
+
 	trusted := strings.TrimSpace(getenv("TRUSTED_PROXIES", "127.0.0.1,::1"))
 	proxies := make([]string, 0, 4)
 	for _, p := range strings.Split(trusted, ",") {
@@ -203,7 +252,7 @@ func setupRouter() *gin.Engine {
 	r.GET("/healthz", healthHandler)
 	r.GET("/readyz", readinessHandler)
 
-	r.GET("/v1/apod", rateLimitMiddleware(apiLimiter), func(c *gin.Context) {
+	r.GET("/v1/apod", apiKeyAuthMiddleware(authKey), rateLimitMiddleware(apiLimiter), func(c *gin.Context) {
 		l := requestLogger(c)
 		started := time.Now()
 		date := c.Query("date")
@@ -236,7 +285,7 @@ func setupRouter() *gin.Engine {
 		c.JSON(http.StatusOK, out)
 	})
 
-	r.GET("/v1/apod/image", rateLimitMiddleware(apiLimiter), func(c *gin.Context) {
+	r.GET("/v1/apod/image", apiKeyAuthMiddleware(authKey), rateLimitMiddleware(apiLimiter), func(c *gin.Context) {
 		l := requestLogger(c)
 		date := c.Query("date")
 		c.Header("Cache-Control", "public, max-age=3600")

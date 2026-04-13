@@ -45,7 +45,7 @@ go run .
 ### 3. 测试接口
 
 ```bash
-curl 'http://127.0.0.1:8080/v1/apod'
+curl -H 'Authorization: Bearer changeme' 'http://127.0.0.1:8080/v1/apod'
 curl 'http://127.0.0.1:8080/healthz'
 curl 'http://127.0.0.1:8080/readyz'
 curl 'http://127.0.0.1:8080/metrics'
@@ -64,6 +64,7 @@ docker build -t apod-server:latest .
 ```bash
 docker run --rm -p 8080:8080 \
 	-e NASA_API_KEY=your_api_key \
+	-e API_AUTH_KEY=your_app_api_key \
 	-e REDIS_ADDR=host.docker.internal:6379 \
 	--name apod-server apod-server:latest
 ```
@@ -115,8 +116,8 @@ NASA_API_KEY=your_api_key docker compose up -d
 
 ## 主要接口
 
-- `GET /v1/apod?date=YYYY-MM-DD`
-- `GET /v1/apod/image?date=YYYY-MM-DD`
+- `GET /v1/apod?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`）
+- `GET /v1/apod/image?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`）
 - `GET /metrics`
 - `GET /healthz`
 - `GET /readyz`
@@ -129,6 +130,7 @@ NASA_API_KEY=your_api_key docker compose up -d
 ### 运行与上游
 
 - `NASA_API_KEY`: NASA API Key，默认 `DEMO_KEY`
+- `API_AUTH_KEY`: 业务 API 访问密钥，默认 `changeme`
 - `API_RATE_LIMIT_RPS`: API 每秒令牌速率，默认 `8`
 - `API_RATE_LIMIT_BURST`: API 突发令牌桶容量，默认 `16`
 

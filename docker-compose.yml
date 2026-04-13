@@ -13,6 +13,7 @@ services:
     environment:
       GIN_MODE: release
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1,::1}
+      API_AUTH_KEY: ${API_AUTH_KEY:-changeme}
       REDIS_ADDR: redis:6379
       REDIS_DB: "0"
       NASA_API_KEY: ${NASA_API_KEY:-DEMO_KEY}
