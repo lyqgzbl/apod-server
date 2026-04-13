@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1
 
 FROM golang:1.26-alpine AS builder
-ARG TARGETARCH
 WORKDIR /src
+
+ENV GOPROXY=https://goproxy.cn,direct \
+    GOSUMDB=sum.golang.google.cn
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -trimpath -ldflags='-s -w' -o /out/apod-server .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/apod-server .
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates curl && \
