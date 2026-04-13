@@ -1,0 +1,73 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: apod-server
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      GIN_MODE: release
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1,::1}
+      REDIS_ADDR: redis:6379
+      REDIS_DB: "0"
+      NASA_API_KEY: ${NASA_API_KEY:-DEMO_KEY}
+      IMAGE_CACHE_DIR: /app/cache/images
+      API_RATE_LIMIT_RPS: ${API_RATE_LIMIT_RPS:-8}
+      API_RATE_LIMIT_BURST: ${API_RATE_LIMIT_BURST:-16}
+      MEMORY_CACHE_TTL_MINUTES: ${MEMORY_CACHE_TTL_MINUTES:-180}
+      MEMORY_CACHE_MAX_ITEMS: ${MEMORY_CACHE_MAX_ITEMS:-2000}
+      MEMORY_CACHE_CLEANUP_MINUTES: ${MEMORY_CACHE_CLEANUP_MINUTES:-15}
+      IMAGE_CACHE_MAX_FILES: ${IMAGE_CACHE_MAX_FILES:-1000}
+      IMAGE_CACHE_MAX_AGE_HOURS: ${IMAGE_CACHE_MAX_AGE_HOURS:-720}
+    volumes:
+      - app_cache:/app/cache
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    container_name: apod-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redis_data:/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  app_cache:
+  redis_data:
