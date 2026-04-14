@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-contrib/gzip"
@@ -19,6 +20,67 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
+
+const demoAPIKey = "DEMO_KEY"
+
+type demoUsage struct {
+	count     int
+	windowBgn time.Time
+}
+
+type demoIPLimiter struct {
+	mu      sync.Mutex
+	limit   int
+	window  time.Duration
+	records map[string]demoUsage
+}
+
+var demoLimiter *demoIPLimiter
+
+func newDemoIPLimiter(limit int, window time.Duration) *demoIPLimiter {
+	if limit <= 0 {
+		limit = 5
+	}
+	if window <= 0 {
+		window = 24 * time.Hour
+	}
+	return &demoIPLimiter{limit: limit, window: window, records: make(map[string]demoUsage, 128)}
+}
+
+func (d *demoIPLimiter) allow(ip string) bool {
+	if d == nil {
+		return true
+	}
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		ip = "unknown"
+	}
+	now := time.Now()
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if len(d.records) > 1024 {
+		for k, rec := range d.records {
+			if now.Sub(rec.windowBgn) >= d.window {
+				delete(d.records, k)
+			}
+		}
+	}
+
+	rec, ok := d.records[ip]
+	if !ok || now.Sub(rec.windowBgn) >= d.window {
+		d.records[ip] = demoUsage{count: 1, windowBgn: now}
+		return true
+	}
+
+	if rec.count >= d.limit {
+		return false
+	}
+	rec.count++
+	d.records[ip] = rec
+	return true
+}
 
 func registerMetrics() {
 	prometheus.MustRegister(apodRequestTotal)
@@ -61,13 +123,25 @@ func apiKeyAuthMiddleware(requiredKey string) gin.HandlerFunc {
 	requiredBytes := []byte(requiredKey)
 	return func(c *gin.Context) {
 		l := requestLogger(c)
-		provided, msg := readAPIKeyFromHeader(c)
+		provided, mode, msg := readAPIKeyFromHeader(c)
 		if msg != "" {
 			l.Warn("auth failed", zap.String("method", c.Request.Method), zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusUnauthorized), zap.String("reason", msg))
 			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": msg})
 			c.Abort()
 			return
 		}
+
+		if mode == "demo" {
+			if demoLimiter != nil && !demoLimiter.allow(c.ClientIP()) {
+				l.Warn("demo key quota exceeded", zap.String("method", c.Request.Method), zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusTooManyRequests))
+				c.JSON(http.StatusTooManyRequests, gin.H{"code": 429, "msg": fmt.Sprintf("DEMO_KEY limit exceeded: %d requests per 24 hours for this IP", demoLimiter.limit)})
+				c.Abort()
+				return
+			}
+			c.Next()
+			return
+		}
+
 		if len(provided) != len(requiredBytes) || subtle.ConstantTimeCompare([]byte(provided), requiredBytes) != 1 {
 			l.Warn("auth failed", zap.String("method", c.Request.Method), zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusUnauthorized), zap.String("reason", "invalid API key"))
 			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "invalid API key"})
@@ -78,26 +152,26 @@ func apiKeyAuthMiddleware(requiredKey string) gin.HandlerFunc {
 	}
 }
 
-func readAPIKeyFromHeader(c *gin.Context) (string, string) {
+func readAPIKeyFromHeader(c *gin.Context) (string, string, string) {
 	authorization := strings.TrimSpace(c.GetHeader("Authorization"))
 	if authorization != "" {
 		parts := strings.SplitN(authorization, " ", 2)
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			return "", "Authorization must use Bearer token"
+			return "", "", "Authorization must use Bearer token"
 		}
 		token := strings.TrimSpace(parts[1])
 		if token == "" {
-			return "", "Bearer token is required"
+			return "", "", "Bearer token is required"
 		}
-		return token, ""
+		return token, "header", ""
 	}
 
 	apiKey := strings.TrimSpace(c.GetHeader("X-API-Key"))
 	if apiKey != "" {
-		return apiKey, ""
+		return apiKey, "header", ""
 	}
 
-	return "", "Authorization: Bearer <token> is required"
+	return demoAPIKey, "demo", ""
 }
 
 func traceIDMiddleware() gin.HandlerFunc {
@@ -363,6 +437,7 @@ func setupRouter() *gin.Engine {
 func runServer() error {
 	ginMode := configureGinMode()
 	logger.Info("runtime configured", zap.String("app_env", appEnv()), zap.String("gin_mode", ginMode), zap.String("log_encoding", logEncoding()))
+	demoLimiter = newDemoIPLimiter(getenvInt("DEMO_KEY_LIMIT_PER_24H", 5), 24*time.Hour)
 	registerMetrics()
 	redisStore = NewRedisStore()
 	imageStore = NewImageStore(getenv("IMAGE_CACHE_DIR", "cache/images"))

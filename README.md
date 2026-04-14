@@ -46,6 +46,7 @@ go run .
 
 ```bash
 curl -H 'Authorization: Bearer changeme' 'http://127.0.0.1:8080/v1/apod'
+curl 'http://127.0.0.1:8080/v1/apod' # 不带 Authorization 时自动使用 DEMO_KEY
 curl 'http://127.0.0.1:8080/healthz'
 curl 'http://127.0.0.1:8080/readyz'
 curl 'http://127.0.0.1:8080/metrics'
@@ -134,6 +135,7 @@ NASA_API_KEY=your_api_key docker compose up -d
 - `LOG_COLOR`: 控制台日志等级着色开关（`true/false`），默认自动检测终端
 - `NASA_API_KEY`: NASA API Key，默认 `DEMO_KEY`
 - `API_AUTH_KEY`: 业务 API 访问密钥，默认 `changeme`
+- `DEMO_KEY_LIMIT_PER_24H`: 未携带 Authorization 时（自动使用 `DEMO_KEY`）每个 IP 24 小时可调用 `/v1/apod` + `/v1/apod/image` 总次数，默认 `5`
 - `API_RATE_LIMIT_RPS`: API 每秒令牌速率，默认 `8`
 - `API_RATE_LIMIT_BURST`: API 突发令牌桶容量，默认 `16`
 
