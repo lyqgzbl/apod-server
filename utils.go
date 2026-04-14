@@ -97,17 +97,67 @@ func buildETag(parts ...string) string {
 	return "\"" + hex.EncodeToString(h.Sum(nil)) + "\""
 }
 
-func baseURL(r *http.Request) string {
-	scheme := "http"
+func firstCSV(v string) string {
+	if v == "" {
+		return ""
+	}
+	parts := strings.Split(v, ",")
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(parts[0])
+}
+
+func forwardedProto(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	entry := firstCSV(v)
+	for _, part := range strings.Split(entry, ";") {
+		part = strings.TrimSpace(part)
+		if len(part) < 6 || !strings.HasPrefix(strings.ToLower(part), "proto=") {
+			continue
+		}
+		proto := strings.Trim(strings.TrimSpace(part[6:]), "\"")
+		return strings.ToLower(proto)
+	}
+	return ""
+}
+
+func detectScheme(r *http.Request) string {
 	if r.TLS != nil {
-		scheme = "https"
+		return "https"
 	}
-	if xfProto := r.Header.Get("X-Forwarded-Proto"); xfProto != "" {
-		scheme = xfProto
+
+	if p := strings.ToLower(firstCSV(r.Header.Get("X-Forwarded-Proto"))); p == "https" || p == "http" {
+		return p
 	}
+	if p := forwardedProto(r.Header.Get("Forwarded")); p == "https" || p == "http" {
+		return p
+	}
+
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Ssl")), "on") {
+		return "https"
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Front-End-Https")), "on") {
+		return "https"
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Url-Scheme")), "https") {
+		return "https"
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("CF-Visitor")), "\"scheme\":\"https\"") {
+		return "https"
+	}
+
+	return "http"
+}
+
+func baseURL(r *http.Request) string {
+	scheme := detectScheme(r)
 	host := r.Host
 	if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
-		host = xfh
+		host = firstCSV(xfh)
 	}
 	return scheme + "://" + host
 }
