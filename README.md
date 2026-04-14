@@ -136,7 +136,7 @@ NASA_API_KEY=your_api_key docker compose up -d
 - `TRUSTED_PROXIES`: 可信代理 IP 或 CIDR（逗号分隔）。仅来自这些代理的 `X-Forwarded-For`/`X-Real-IP` 才会被信任。默认 `127.0.0.1,::1`
 - `NASA_API_KEY`: NASA API Key，默认 `DEMO_KEY`
 - `API_AUTH_KEY`: 业务 API 访问密钥，默认 `changeme`
-- `DEMO_KEY_LIMIT_PER_24H`: 未携带 Authorization 时（自动使用 `DEMO_KEY`）每个 IP 24 小时可调用 `/v1/apod` + `/v1/apod/image` 总次数，默认 `5`
+- `DEMO_KEY_LIMIT_PER_24H`: 未携带 Authorization 时（自动使用 `DEMO_KEY`）每个 IP 24 小时可调用 `/v1/apod` + `/v1/apod/image` 的 HTTP 200 响应总次数，默认 `5`
 - `API_RATE_LIMIT_RPS`: API 每秒令牌速率，默认 `8`
 - `API_RATE_LIMIT_BURST`: API 突发令牌桶容量，默认 `16`
 

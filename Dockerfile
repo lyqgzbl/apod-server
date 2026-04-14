@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 WORKDIR /src
 
-ENV GOPROXY=https://goproxy.cn,direct \
-    GOSUMDB=sum.golang.google.cn
+ENV GOPROXY=https://proxy.golang.org,direct \
+    GOSUMDB=sum.golang.org
 
 COPY go.mod go.sum ./
 RUN go mod download

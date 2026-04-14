@@ -82,6 +82,35 @@ func (d *demoIPLimiter) allow(ip string) bool {
 	return true
 }
 
+func (d *demoIPLimiter) rollback(ip string) {
+	if d == nil {
+		return
+	}
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		ip = "unknown"
+	}
+	now := time.Now()
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rec, ok := d.records[ip]
+	if !ok {
+		return
+	}
+	if now.Sub(rec.windowBgn) >= d.window {
+		delete(d.records, ip)
+		return
+	}
+	if rec.count <= 1 {
+		delete(d.records, ip)
+		return
+	}
+	rec.count--
+	d.records[ip] = rec
+}
+
 func registerMetrics() {
 	prometheus.MustRegister(apodRequestTotal)
 	prometheus.MustRegister(apodRequestDuration)
@@ -140,6 +169,9 @@ func apiKeyAuthMiddleware(requiredKey string) gin.HandlerFunc {
 				return
 			}
 			c.Next()
+			if demoLimiter != nil && c.Writer.Status() != http.StatusOK {
+				demoLimiter.rollback(ip)
+			}
 			return
 		}
 
