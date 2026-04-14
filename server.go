@@ -123,17 +123,18 @@ func apiKeyAuthMiddleware(requiredKey string) gin.HandlerFunc {
 	requiredBytes := []byte(requiredKey)
 	return func(c *gin.Context) {
 		l := requestLogger(c)
+		ip := realIP(c.Request)
 		provided, mode, msg := readAPIKeyFromHeader(c)
 		if msg != "" {
-			l.Warn("auth failed", zap.String("method", c.Request.Method), zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusUnauthorized), zap.String("reason", msg))
+			l.Warn("auth failed", zap.String("method", c.Request.Method), zap.String("ip", ip), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusUnauthorized), zap.String("reason", msg))
 			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": msg})
 			c.Abort()
 			return
 		}
 
 		if mode == "demo" {
-			if demoLimiter != nil && !demoLimiter.allow(c.ClientIP()) {
-				l.Warn("demo key quota exceeded", zap.String("method", c.Request.Method), zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusTooManyRequests))
+			if demoLimiter != nil && !demoLimiter.allow(ip) {
+				l.Warn("demo key quota exceeded", zap.String("method", c.Request.Method), zap.String("ip", ip), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusTooManyRequests))
 				c.JSON(http.StatusTooManyRequests, gin.H{"code": 429, "msg": fmt.Sprintf("DEMO_KEY limit exceeded: %d requests per 24 hours for this IP", demoLimiter.limit)})
 				c.Abort()
 				return
@@ -143,7 +144,7 @@ func apiKeyAuthMiddleware(requiredKey string) gin.HandlerFunc {
 		}
 
 		if len(provided) != len(requiredBytes) || subtle.ConstantTimeCompare([]byte(provided), requiredBytes) != 1 {
-			l.Warn("auth failed", zap.String("method", c.Request.Method), zap.String("ip", c.ClientIP()), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusUnauthorized), zap.String("reason", "invalid API key"))
+			l.Warn("auth failed", zap.String("method", c.Request.Method), zap.String("ip", ip), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusUnauthorized), zap.String("reason", "invalid API key"))
 			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "invalid API key"})
 			c.Abort()
 			return
@@ -215,12 +216,13 @@ func accessLogMiddleware() gin.HandlerFunc {
 
 		status := c.Writer.Status()
 		latency := time.Since(started)
+		ip := realIP(c.Request)
 		fields := []zap.Field{
 			zap.String("method", method),
 			zap.String("path", path),
 			zap.Int("status", status),
 			latencyFieldForAccessLog(latency),
-			zap.String("ip", c.ClientIP()),
+			zap.String("ip", ip),
 		}
 		if len(c.Errors) > 0 {
 			fields = append(fields, zap.String("errors", c.Errors.String()))
@@ -355,6 +357,7 @@ func setupRouter() *gin.Engine {
 	if len(proxies) == 0 {
 		proxies = []string{"127.0.0.1", "::1"}
 	}
+	setTrustedProxiesForRealIP(proxies)
 	if err := r.SetTrustedProxies(proxies); err != nil {
 		logger.Warn("set trusted proxies failed", zap.Error(err), zap.Strings("trusted_proxies", proxies))
 	}
