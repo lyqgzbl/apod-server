@@ -61,6 +61,7 @@ func fetchFromNASA(ctx context.Context, date string) (*APOD, error) {
 	apod := &APOD{
 		Date:        getString(result["date"]),
 		Title:       getString(result["title"]),
+		Copyright:   getString(result["copyright"]),
 		Explanation: getString(result["explanation"]),
 		ImageURL:    imgURL,
 		OriginImage: imgURL,
@@ -108,6 +109,7 @@ func fetchFromWeb(ctx context.Context, date time.Time) (*APOD, error) {
 	apod.Title = strings.TrimSpace(doc.Find("center b").First().Text())
 	apod.ImageURL, apod.MediaType = extractMedia(doc)
 	apod.OriginImage = apod.ImageURL
+	apod.Copyright = extractCopyright(doc)
 	apod.Explanation = extractExplanation(doc)
 
 	if len(apod.Explanation) < 80 {
@@ -130,6 +132,66 @@ func extractMedia(doc *goquery.Document) (string, string) {
 		}
 	}
 	return "", "other"
+}
+
+func extractCopyright(doc *goquery.Document) string {
+	var result string
+
+	doc.Find("body *").EachWithBreak(func(_ int, s *goquery.Selection) bool {
+		text := strings.TrimSpace(s.Text())
+		if !strings.Contains(strings.ToLower(text), "copyright") {
+			return true
+		}
+		if c := parseCopyrightText(text); c != "" {
+			result = c
+			return false
+		}
+		if c := parseCopyrightText(s.Parent().Text()); c != "" {
+			result = c
+			return false
+		}
+		return true
+	})
+	if result != "" {
+		return result
+	}
+
+	for _, line := range strings.Split(doc.Find("body").Text(), "\n") {
+		if c := parseCopyrightText(line); c != "" {
+			return c
+		}
+	}
+
+	return ""
+}
+
+func parseCopyrightText(text string) string {
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\r", " "))
+	text = strings.TrimSpace(strings.Join(strings.Fields(text), " "))
+	if text == "" {
+		return ""
+	}
+
+	lower := strings.ToLower(text)
+	idx := strings.Index(lower, "copyright")
+	if idx == -1 {
+		return ""
+	}
+
+	value := strings.TrimSpace(text[idx+len("copyright"):])
+	value = strings.TrimLeft(value, ":：- ")
+	if value == "" {
+		return ""
+	}
+
+	markers := []string{"explanation:", "tomorrow"}
+	for _, marker := range markers {
+		if cut := strings.Index(strings.ToLower(value), marker); cut != -1 {
+			value = strings.TrimSpace(value[:cut])
+		}
+	}
+
+	return value
 }
 
 func extractExplanation(doc *goquery.Document) string {
