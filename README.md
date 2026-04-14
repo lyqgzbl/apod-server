@@ -133,11 +133,40 @@ NASA_API_KEY=your_api_key docker compose up -d
 - `APP_ENV`: 运行环境，`development` 或 `production`，默认 `development`
 - `LOG_LEVEL`: 日志级别，默认开发环境 `debug`，生产环境 `info`
 - `LOG_COLOR`: 控制台日志等级着色开关（`true/false`），默认自动检测终端
+- `TRUSTED_PROXIES`: 可信代理 IP 或 CIDR（逗号分隔）。仅来自这些代理的 `X-Forwarded-For`/`X-Real-IP` 才会被信任。默认 `127.0.0.1,::1`
 - `NASA_API_KEY`: NASA API Key，默认 `DEMO_KEY`
 - `API_AUTH_KEY`: 业务 API 访问密钥，默认 `changeme`
 - `DEMO_KEY_LIMIT_PER_24H`: 未携带 Authorization 时（自动使用 `DEMO_KEY`）每个 IP 24 小时可调用 `/v1/apod` + `/v1/apod/image` 总次数，默认 `5`
 - `API_RATE_LIMIT_RPS`: API 每秒令牌速率，默认 `8`
 - `API_RATE_LIMIT_BURST`: API 突发令牌桶容量，默认 `16`
+
+反向代理场景说明：
+
+- Nginx 反代请确保透传以下请求头（示例）：
+
+```nginx
+location / {
+	proxy_pass http://127.0.0.1:8080;
+	proxy_set_header Host $host;
+	proxy_set_header X-Real-IP $remote_addr;
+	proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+- 若 Nginx 在宿主机反代 Docker 容器，常见来源 IP 是 Docker 网关（例如 `172.18.0.1`），需要把该 IP 加入 `TRUSTED_PROXIES`
+- 如果未加入，服务会把来源记录为网关 IP，而不是客户端真实 IP
+- `/healthz` 的容器健康检查请求通常来自本机，日志里出现 `127.0.0.1` 属于正常现象
+
+可按下面步骤快速验证配置：
+
+```bash
+# 1) 设置可信代理（示例：宿主机 Nginx -> Docker 容器）
+TRUSTED_PROXIES=127.0.0.1,::1,172.18.0.1
+
+# 2) 发起业务请求并观察日志中的 ip 字段
+curl -H 'Authorization: Bearer changeme' 'http://127.0.0.1:8080/v1/apod'
+```
 
 ### Redis
 
