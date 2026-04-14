@@ -59,13 +59,17 @@ func fetchFromNASA(ctx context.Context, date string) (*APOD, error) {
 
 	imgURL := getString(result["url"])
 	apod := &APOD{
-		Date:        getString(result["date"]),
-		Title:       getString(result["title"]),
-		Copyright:   getString(result["copyright"]),
-		Explanation: getString(result["explanation"]),
-		ImageURL:    imgURL,
-		OriginImage: imgURL,
-		MediaType:   getString(result["media_type"]),
+		Date:           getString(result["date"]),
+		Title:          getString(result["title"]),
+		Copyright:      getString(result["copyright"]),
+		Explanation:    getString(result["explanation"]),
+		ImageURL:       imgURL,
+		OriginImage:    imgURL,
+		MediaType:      getString(result["media_type"]),
+		ServiceVersion: getString(result["service_version"]),
+	}
+	if apod.ServiceVersion == "" {
+		apod.ServiceVersion = "v1"
 	}
 	if len(apod.Explanation) < 50 {
 		apodParseFailTotal.WithLabelValues("nasa").Inc()
@@ -111,6 +115,7 @@ func fetchFromWeb(ctx context.Context, date time.Time) (*APOD, error) {
 	apod.OriginImage = apod.ImageURL
 	apod.Copyright = extractCopyright(doc)
 	apod.Explanation = extractExplanation(doc)
+	apod.ServiceVersion = "v1"
 
 	if len(apod.Explanation) < 80 {
 		apodParseFailTotal.WithLabelValues("web").Inc()
@@ -375,15 +380,27 @@ func getAPOD(ctx context.Context, dateStr string) (*APOD, string, error) {
 	return res.apod, res.source, nil
 }
 
-func presentAPOD(c *gin.Context, apod *APOD) *APOD {
-	out := *apod
+func presentAPOD(c *gin.Context, apod *APOD) *APODResponse {
+	out := &APODResponse{
+		Copyright:      apod.Copyright,
+		Date:           apod.Date,
+		Explanation:    apod.Explanation,
+		HDURL:          apod.OriginImage,
+		MediaType:      apod.MediaType,
+		ServiceVersion: apod.ServiceVersion,
+		Title:          apod.Title,
+		URL:            apod.ImageURL,
+	}
+	if out.ServiceVersion == "" {
+		out.ServiceVersion = "v1"
+	}
 	if out.MediaType == "image" {
-		if out.OriginImage == "" {
-			out.OriginImage = out.ImageURL
+		if out.HDURL == "" {
+			out.HDURL = out.URL
 		}
-		if out.OriginImage != "" {
-			out.ImageURL = fmt.Sprintf("%s/v1/apod/image?date=%s", baseURL(c.Request), out.Date)
+		if out.HDURL != "" {
+			out.URL = fmt.Sprintf("%s/v1/apod/image?date=%s", baseURL(c.Request), out.Date)
 		}
 	}
-	return &out
+	return out
 }

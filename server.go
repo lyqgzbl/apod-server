@@ -314,7 +314,7 @@ func setupRouter() *gin.Engine {
 		}
 
 		out := presentAPOD(c, apod)
-		tag := buildETag(out.Date, out.ImageURL)
+		tag := buildETag(out.Date, out.URL)
 		c.Header("ETag", tag)
 		if c.GetHeader("If-None-Match") == tag {
 			c.Status(http.StatusNotModified)
