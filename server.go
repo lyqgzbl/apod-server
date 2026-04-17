@@ -416,7 +416,7 @@ func setupRouter() *gin.Engine {
 	r.GET("/healthz", healthHandler)
 	r.GET("/readyz", readinessHandler)
 	r.GET("/static/apod/:date.jpg", func(c *gin.Context) {
-		date := strings.TrimSpace(c.Param("date"))
+		date := strings.TrimSpace(strings.TrimSuffix(c.Param("date"), ".jpg"))
 		if !isValidISODate(date) {
 			badDateRequest(c)
 			return
