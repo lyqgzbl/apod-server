@@ -22,6 +22,7 @@ import (
 )
 
 const demoAPIKey = "DEMO_KEY"
+const invalidDateErrorMessage = "Invalid date format, expected YYYY-MM-DD"
 
 type demoUsage struct {
 	count     int
@@ -351,6 +352,18 @@ func healthHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
+func isValidISODate(date string) bool {
+	if date == "" {
+		return false
+	}
+	_, err := time.Parse("2006-01-02", date)
+	return err == nil
+}
+
+func badDateRequest(c *gin.Context) {
+	c.JSON(http.StatusBadRequest, gin.H{"error": invalidDateErrorMessage})
+}
+
 func readinessHandler(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
@@ -402,15 +415,52 @@ func setupRouter() *gin.Engine {
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	r.GET("/healthz", healthHandler)
 	r.GET("/readyz", readinessHandler)
+	r.GET("/static/apod/:date.jpg", func(c *gin.Context) {
+		date := strings.TrimSpace(c.Param("date"))
+		if !isValidISODate(date) {
+			badDateRequest(c)
+			return
+		}
+
+		apod, source, err := getAPOD(c.Request.Context(), date)
+		if err != nil {
+			if source == "invalid" {
+				badDateRequest(c)
+				return
+			}
+			requestLogger(c).Warn("get apod for static image failed", zap.String("date", date), zap.String("source", source), zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": err.Error()})
+			return
+		}
+		if apod.MediaType != "image" {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "media type is not image"})
+			return
+		}
+
+		origin := apod.OriginImage
+		if origin == "" {
+			origin = apod.ImageURL
+		}
+		c.Header("Cache-Control", "public, max-age=86400")
+		imageStore.Serve(c, apod.Date, origin)
+	})
 
 	r.GET("/v1/apod", apiKeyAuthMiddleware(authKey), rateLimitMiddleware(apiLimiter), func(c *gin.Context) {
 		l := requestLogger(c)
 		started := time.Now()
-		date := c.Query("date")
+		date := strings.TrimSpace(c.Query("date"))
+		if date != "" && !isValidISODate(date) {
+			badDateRequest(c)
+			return
+		}
 		c.Header("Cache-Control", "public, max-age=3600")
 
 		apod, source, err := getAPOD(c.Request.Context(), date)
 		if err != nil {
+			if source == "invalid" {
+				badDateRequest(c)
+				return
+			}
 			apodRequestTotal.WithLabelValues("error", source).Inc()
 			apodRequestDuration.WithLabelValues(source).Observe(time.Since(started).Seconds())
 			if source == "failed" {
@@ -438,14 +488,20 @@ func setupRouter() *gin.Engine {
 
 	r.GET("/v1/apod/image", apiKeyAuthMiddleware(authKey), rateLimitMiddleware(apiLimiter), func(c *gin.Context) {
 		l := requestLogger(c)
-		date := c.Query("date")
-		c.Header("Cache-Control", "public, max-age=3600")
+		date := strings.TrimSpace(c.Query("date"))
 		if date == "" {
 			date = getNasaTime().Format("2006-01-02")
+		} else if !isValidISODate(date) {
+			badDateRequest(c)
+			return
 		}
-		apod, _, err := getAPOD(c.Request.Context(), date)
+		apod, source, err := getAPOD(c.Request.Context(), date)
 		if err != nil {
-			l.Warn("get apod for image failed", zap.String("date", date), zap.Error(err))
+			if source == "invalid" {
+				badDateRequest(c)
+				return
+			}
+			l.Warn("get apod for image failed", zap.String("date", date), zap.String("source", source), zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": err.Error()})
 			return
 		}
@@ -453,17 +509,8 @@ func setupRouter() *gin.Engine {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "media type is not image"})
 			return
 		}
-		origin := apod.OriginImage
-		if origin == "" {
-			origin = apod.ImageURL
-		}
-		tag := buildETag(apod.Date, origin)
-		c.Header("ETag", tag)
-		if c.GetHeader("If-None-Match") == tag {
-			c.Status(http.StatusNotModified)
-			return
-		}
-		imageStore.Serve(c, apod.Date, origin)
+		c.Header("Cache-Control", "public, max-age=86400")
+		c.Redirect(http.StatusFound, fmt.Sprintf("/static/apod/%s.jpg", apod.Date))
 	})
 
 	return r

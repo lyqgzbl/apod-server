@@ -118,10 +118,26 @@ NASA_API_KEY=your_api_key docker compose up -d
 ## 主要接口
 
 - `GET /v1/apod?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`）
-- `GET /v1/apod/image?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`）
+- `GET /v1/apod/image?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`，兼容接口，302 跳转到静态图片）
+- `GET /static/apod/YYYY-MM-DD.jpg`（带扩展名图片直链，便于 CDN/客户端识别）
 - `GET /metrics`
 - `GET /healthz`
 - `GET /readyz`
+
+参数校验说明：
+
+- `date` 必须是 `YYYY-MM-DD`，例如 `2026-04-01`
+- 非法日期格式会返回 `400 Bad Request`
+
+```json
+{
+	"error": "Invalid date format, expected YYYY-MM-DD"
+}
+```
+
+图片接口缓存说明：
+
+- `/v1/apod/image` 与 `/static/apod/YYYY-MM-DD.jpg` 返回 `Cache-Control: public, max-age=86400`
 
 ## 环境变量
 

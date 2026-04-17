@@ -399,7 +399,7 @@ func presentAPOD(c *gin.Context, apod *APOD) *APODResponse {
 			out.HDURL = out.URL
 		}
 		if out.HDURL != "" {
-			out.URL = fmt.Sprintf("%s/v1/apod/image?date=%s", baseURL(c.Request), out.Date)
+			out.URL = fmt.Sprintf("%s/static/apod/%s.jpg", baseURL(c.Request), out.Date)
 		}
 	}
 	return out
