@@ -415,8 +415,14 @@ func setupRouter() *gin.Engine {
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	r.GET("/healthz", healthHandler)
 	r.GET("/readyz", readinessHandler)
-	r.GET("/static/apod/:date.jpg", func(c *gin.Context) {
-		date := strings.TrimSpace(strings.TrimSuffix(c.Param("date"), ".jpg"))
+	r.GET("/static/apod/:filename", func(c *gin.Context) {
+		filename := strings.TrimSpace(c.Param("filename"))
+		lowerFilename := strings.ToLower(filename)
+		if !strings.HasSuffix(lowerFilename, ".jpg") {
+			badDateRequest(c)
+			return
+		}
+		date := strings.TrimSpace(filename[:len(filename)-4])
 		if !isValidISODate(date) {
 			badDateRequest(c)
 			return
