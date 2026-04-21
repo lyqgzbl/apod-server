@@ -14,25 +14,41 @@
 
 ## 项目结构
 
-- [main.go](main.go): 启动入口
-- [app_state.go](app_state.go): 全局常量与运行时状态
-- [model.go](model.go): 数据模型
-- [cache_memory.go](cache_memory.go): 内存缓存与淘汰策略
-- [redis_store.go](redis_store.go): Redis 持久缓存与熔断
-- [image_store.go](image_store.go): 图片缓存与清理
-- [fetch.go](fetch.go): NASA/Web 抓取与解析
-- [utils.go](utils.go): 工具函数与上下文日志
-- [server.go](server.go): HTTP 路由、中间件、定时任务
-- [Dockerfile](Dockerfile): 生产镜像构建
-- [docker-compose.yml](docker-compose.yml): 应用 + Redis 本地编排
-
-## 快速开始
-
-### 1. 安装依赖
-
-```bash
-go mod tidy
 ```
+.
+├── configs/              # 配置文件
+│   └── .env.example    # 环境变量示例
+├── deployments/        # 部署配置
+│   ├── Dockerfile     # 生产镜像构建
+│   └── docker-compose.yml # 应用 + Redis 本地编排
+├── .github/           # GitHub Actions
+├── internal/
+│   ├── model/        # 数据模型
+│   │   └── model.go  # APOD 数据结构
+│   └── store/        # 存储层
+│       ├── cache/   # 内存缓存实现
+│       │   └── cache.go
+│       └── redis/   # Redis 存储实现
+│           └── store.go
+├── main.go            # 启动入口
+├── app_state.go       # 全局常量与运行时状态
+├── cache_memory.go   # 内存缓存（旧）
+├── fetch.go          # NASA/Web 抓取与解析
+├── image_store.go    # 图片缓存与清理
+├── logging.go        # 日志配置
+├── model.go          # 数据模型（旧）
+├── redis_store.go    # Redis 持久缓存（旧）
+├── server.go        # HTTP 路由、中间件、定时任务
+├── server_test.go   # 测试
+└── utils.go         # 工具函数与上下文日志
+```
+
+### 代码说明
+
+- `internal/model/`: 独立数据模型包，可被外部项目引用
+- `internal/store/cache`: 内存缓存实现，支持 TTL 和容量淘汰
+- `internal/store/redis`: Redis 存储实现，支持熔断机制
+- 根目录保留旧版实现以保持向后兼容
 
 ### 2. 运行服务
 
@@ -57,7 +73,7 @@ curl 'http://127.0.0.1:8080/metrics'
 ### 1. 构建镜像
 
 ```bash
-docker build -t apod-server:latest .
+docker build -t apod-server:latest -f deployments/Dockerfile .
 ```
 
 ### 2. 单容器运行
@@ -67,6 +83,7 @@ docker run --rm -p 8080:8080 \
 	-e NASA_API_KEY=your_api_key \
 	-e API_AUTH_KEY=your_app_api_key \
 	-e REDIS_ADDR=host.docker.internal:6379 \
+	-v "$(pwd)/cache/images:/app/cache/images" \
 	--name apod-server apod-server:latest
 ```
 
@@ -78,32 +95,32 @@ docker run --rm -p 8080:8080 \
 ### 3. 使用 Docker Compose（推荐）
 
 ```bash
-docker compose up -d --build
+docker compose -f deployments/docker-compose.yml up -d --build
 ```
 
 查看状态与日志：
 
 ```bash
-docker compose ps
-docker compose logs -f app
-docker compose logs -f redis
+docker compose -f deployments/docker-compose.yml ps
+docker compose -f deployments/docker-compose.yml logs -f app
+docker compose -f deployments/docker-compose.yml logs -f redis
 ```
 
 停止并清理：
 
 ```bash
-docker compose down
+docker compose -f deployments/docker-compose.yml down
 ```
 
 如果要同时删除 Redis 持久化数据卷：
 
 ```bash
-docker compose down -v
+docker compose -f deployments/docker-compose.yml down -v
 ```
 
 ### 4. Compose 环境变量优先级
 
-`docker-compose.yml` 中使用 `${VAR:-default}` 语法，实际优先级为：
+`deployments/docker-compose.yml` 中使用 `${VAR:-default}` 语法，实际优先级为：
 
 - shell 导出的环境变量
 - 项目根目录 `.env` 文件
@@ -112,7 +129,7 @@ docker compose down -v
 示例：
 
 ```bash
-NASA_API_KEY=your_api_key docker compose up -d
+NASA_API_KEY=your_api_key docker compose -f deployments/docker-compose.yml up -d
 ```
 
 ## 主要接口
