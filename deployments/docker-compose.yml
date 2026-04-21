@@ -1,8 +1,8 @@
 services:
   app:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: deployments/Dockerfile
     container_name: apod-server
     restart: unless-stopped
     depends_on:
@@ -17,7 +17,7 @@ services:
       REDIS_ADDR: redis:6379
       REDIS_DB: "0"
       NASA_API_KEY: ${NASA_API_KEY:-DEMO_KEY}
-      IMAGE_CACHE_DIR: /app/cache/images
+      IMAGE_CACHE_DIR: /app/cache
       API_RATE_LIMIT_RPS: ${API_RATE_LIMIT_RPS:-8}
       API_RATE_LIMIT_BURST: ${API_RATE_LIMIT_BURST:-16}
       MEMORY_CACHE_TTL_MINUTES: ${MEMORY_CACHE_TTL_MINUTES:-180}
