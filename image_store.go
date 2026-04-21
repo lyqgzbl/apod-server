@@ -34,11 +34,11 @@ func NewImageStore(dir string) *ImageStore {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		logger.Fatal("create image cache dir failed", zap.Error(err), zap.String("dir", dir))
 	}
-	maxFiles := getenvInt("IMAGE_CACHE_MAX_FILES", 1000)
-	maxAgeHours := getenvInt("IMAGE_CACHE_MAX_AGE_HOURS", 24*30)
+	maxFiles := getenvInt("IMAGE_CACHE_MAX_FILES", imageMaxFiles)
+	maxAgeHours := getenvInt("IMAGE_CACHE_MAX_AGE_HOURS", imageMaxAgeHours)
 	return &ImageStore{
 		dir:      dir,
-		client:   &http.Client{Timeout: 15 * time.Second, Transport: sharedTransport},
+		client:   &http.Client{Timeout: imageDownloadTimeout, Transport: sharedTransport},
 		maxFiles: maxFiles,
 		maxAge:   time.Duration(maxAgeHours) * time.Hour,
 		hotDays:  imageHotDays,
@@ -58,7 +58,7 @@ func (s *ImageStore) Ensure(ctx context.Context, date, originURL string) {
 		return
 	}
 	l := loggerFromCtx(ctx)
-	dlCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	dlCtx, cancel := context.WithTimeout(ctx, imageDownloadTimeout)
 	defer cancel()
 
 	_, _, _ = fetchSF.Do("apod:image:"+date, func() (interface{}, error) {
@@ -70,12 +70,15 @@ func (s *ImageStore) Ensure(ctx context.Context, date, originURL string) {
 		case imgSem <- struct{}{}:
 			defer func() { <-imgSem }()
 		case <-dlCtx.Done():
+			imageDownloadTotal.WithLabelValues("skipped").Inc()
 			return nil, dlCtx.Err()
 		}
 
+		start := time.Now()
 		req, err := http.NewRequest(http.MethodGet, originURL, nil)
 		if err != nil {
 			l.Warn("build image request failed", zap.Error(err), zap.String("url", originURL))
+			imageDownloadTotal.WithLabelValues("error").Inc()
 			return nil, err
 		}
 		req = req.WithContext(dlCtx)
@@ -84,6 +87,7 @@ func (s *ImageStore) Ensure(ctx context.Context, date, originURL string) {
 		resp, err := s.client.Do(req)
 		if err != nil {
 			l.Warn("download image failed", zap.Error(err), zap.String("url", originURL))
+			imageDownloadTotal.WithLabelValues("error").Inc()
 			return nil, err
 		}
 		defer resp.Body.Close()
@@ -91,6 +95,7 @@ func (s *ImageStore) Ensure(ctx context.Context, date, originURL string) {
 		if resp.StatusCode != http.StatusOK {
 			err := fmt.Errorf("download image bad status: %d", resp.StatusCode)
 			l.Warn("download image bad status", zap.Int("status", resp.StatusCode), zap.String("url", originURL))
+			imageDownloadTotal.WithLabelValues("error").Inc()
 			return nil, err
 		}
 
@@ -125,8 +130,11 @@ func (s *ImageStore) Ensure(ctx context.Context, date, originURL string) {
 		if err := os.Rename(tmp, finalPath); err != nil {
 			_ = os.Remove(tmp)
 			l.Warn("rename image failed", zap.Error(err), zap.String("path", finalPath))
+			imageDownloadTotal.WithLabelValues("error").Inc()
 			return nil, err
 		}
+		imageDownloadTotal.WithLabelValues("success").Inc()
+		imageDownloadDuration.WithLabelValues("success").Observe(time.Since(start).Seconds())
 		l.Info("image cached", zap.String("date", date), zap.String("path", finalPath))
 		return nil, nil
 	})

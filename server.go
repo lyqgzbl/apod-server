@@ -123,6 +123,8 @@ func registerMetrics() {
 	prometheus.MustRegister(apodCacheHitRatio)
 	prometheus.MustRegister(imageCacheHitTotal)
 	prometheus.MustRegister(imageCacheMissTotal)
+	prometheus.MustRegister(imageDownloadTotal)
+	prometheus.MustRegister(imageDownloadDuration)
 }
 
 func newRateLimiter() *rate.Limiter {
@@ -388,7 +390,11 @@ func setupRouter() *gin.Engine {
 	r := gin.New()
 	authKey := strings.TrimSpace(getenv("API_AUTH_KEY", "changeme"))
 	if authKey == "changeme" {
-		logger.Warn("using default API_AUTH_KEY, please override in production")
+		if isProdEnv() {
+			logger.Fatal("API_AUTH_KEY must be set in production", zap.String("current", "changeme"))
+		} else {
+			logger.Warn("using default API_AUTH_KEY, please override in production")
+		}
 	}
 
 	trusted := strings.TrimSpace(getenv("TRUSTED_PROXIES", "127.0.0.1,::1"))

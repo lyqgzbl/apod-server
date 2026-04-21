@@ -49,7 +49,7 @@ func fetchFromNASA(ctx context.Context, date string) (*APOD, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		apodFetchFailTotal.WithLabelValues("nasa").Inc()
-		return nil, fmt.Errorf("NASA API error")
+		return nil, fmt.Errorf("NASA API error: status %d", resp.StatusCode)
 	}
 
 	var result map[string]interface{}
@@ -343,13 +343,6 @@ func getAPOD(ctx context.Context, dateStr string) (*APOD, string, error) {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
-		}
-		if data := cache.Get(dateStr); data != nil {
-			return fetchResult{apod: data, source: "memory"}, nil
-		}
-		if data := redisStore.Get(dateStr); data != nil {
-			cache.Set(dateStr, data)
-			return fetchResult{apod: data, source: "redis"}, nil
 		}
 		apod, source, fetchErr := realFetchLogic(ctx, dateStr, date)
 		if fetchErr != nil {

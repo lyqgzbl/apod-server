@@ -12,14 +12,18 @@ import (
 )
 
 const (
-	redisAPODPrefix = "apod:data:"
-	redisLastDate   = "apod:last_date"
-	redisTTL        = 30 * 24 * time.Hour
-	defaultUA       = "apod-mirror/1.0"
-	redisFailWindow = 5 * time.Second
-	redisFailMax    = 3
-	imageHotDays    = 7
-	memoryEvictStep = 10
+	redisAPODPrefix   = "apod:data:"
+	redisLastDate     = "apod:last_date"
+	redisTTL          = 30 * 24 * time.Hour
+	defaultUA         = "apod-mirror/1.0"
+	redisFailWindow   = 5 * time.Second
+	redisFailMax      = 3
+	imageHotDays      = 7
+	imageMaxAgeHours  = 24 * 30
+	imageMaxFiles     = 1000
+	memoryEvictStep   = 10
+	imageDownloadTimeout = 20 * time.Second
+	imageSemCount     = 5
 )
 
 var (
@@ -33,7 +37,7 @@ var (
 	logger *zap.Logger
 
 	fetchSF singleflight.Group
-	imgSem  = make(chan struct{}, 5)
+	imgSem  = make(chan struct{}, imageSemCount)
 
 	cacheHits   atomic.Uint64
 	cacheMisses atomic.Uint64
@@ -92,6 +96,14 @@ var (
 	)
 	imageCacheMissTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "apod_image_cache_miss_total", Help: "Total APOD image cache misses"},
+	)
+	imageDownloadTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "apod_image_download_total", Help: "Total APOD image download attempts"},
+		[]string{"status"},
+	)
+	imageDownloadDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{Name: "apod_image_download_duration_seconds", Help: "APOD image download latency", Buckets: []float64{1, 2, 5, 10, 15, 20}},
+		[]string{"status"},
 	)
 
 	redisStore *RedisStore
