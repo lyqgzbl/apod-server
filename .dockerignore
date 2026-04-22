@@ -1,0 +1,29 @@
+.git
+.github
+.gitignore
+.dockerignore
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# Build artifacts
+apod-server
+
+# Cache data
+cache/
+*.jpg
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Plans
+.opencode/
+
+# Docs (not needed in image)
+README.md
+LICENSE
