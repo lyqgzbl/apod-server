@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-contrib/gzip"
@@ -178,7 +180,7 @@ func apiKeyAuthMiddleware(requiredKey string) gin.HandlerFunc {
 			return
 		}
 
-		if len(provided) != len(requiredBytes) || subtle.ConstantTimeCompare([]byte(provided), requiredBytes) != 1 {
+		if subtle.ConstantTimeEq(int32(len(provided)), int32(len(requiredBytes))) != 1 || subtle.ConstantTimeCompare([]byte(provided), requiredBytes) != 1 {
 			l.Warn("auth failed", zap.String("method", c.Request.Method), zap.String("ip", ip), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusUnauthorized), zap.String("reason", "invalid API key"))
 			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "invalid API key"})
 			c.Abort()
@@ -275,19 +277,31 @@ func accessLogMiddleware() gin.HandlerFunc {
 	}
 }
 
-func startPrefetchCron() {
-	loc, _ := time.LoadLocation("America/New_York")
-	c := cron.New(cron.WithLocation(loc))
-	_, err := c.AddFunc("5 0 * * *", func() {
-		date := getNasaTime().Format("2006-01-02")
-		ctx, cancel := context.WithTimeout(withLogger(context.Background(), logger.With(zap.String("trace_id", "cron-prefetch"))), 15*time.Second)
-		defer cancel()
+func prefetchWithRetry(traceID string, maxRetries int) {
+	date := getNasaTime().Format("2006-01-02")
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			logger.Info("cron prefetch retry scheduled", zap.String("date", date), zap.Int("attempt", attempt+1), zap.Int("max_attempts", maxRetries+1))
+			time.Sleep(5 * time.Minute)
+			date = getNasaTime().Format("2006-01-02")
+		}
+		ctx, cancel := context.WithTimeout(withLogger(context.Background(), logger.With(zap.String("trace_id", traceID))), 20*time.Second)
 		apod, source, err := getAPOD(ctx, date)
-		if err != nil {
-			logger.Error("cron prefetch failed", zap.String("date", date), zap.Error(err))
+		cancel()
+		if err == nil {
+			logger.Info("prefetch success", zap.String("trace_id", traceID), zap.String("date", apod.Date), zap.String("source", source), zap.Int("attempt", attempt+1))
 			return
 		}
-		logger.Info("cron prefetch success", zap.String("date", apod.Date), zap.String("source", source))
+		logger.Warn("prefetch attempt failed", zap.String("trace_id", traceID), zap.String("date", date), zap.Int("attempt", attempt+1), zap.Int("max_attempts", maxRetries+1), zap.Error(err))
+	}
+	logger.Warn("prefetch exhausted all retries", zap.String("trace_id", traceID), zap.String("date", date), zap.Int("max_attempts", maxRetries+1))
+}
+
+func startPrefetchCron() *cron.Cron {
+	loc, _ := time.LoadLocation("America/New_York")
+	c := cron.New(cron.WithLocation(loc))
+	_, err := c.AddFunc("30 0 * * *", func() {
+		prefetchWithRetry("cron-prefetch", 3)
 	})
 	if err != nil {
 		logger.Fatal("start cron failed", zap.Error(err))
@@ -295,19 +309,14 @@ func startPrefetchCron() {
 	c.Start()
 
 	go func() {
-		date := getNasaTime().Format("2006-01-02")
-		ctx, cancel := context.WithTimeout(withLogger(context.Background(), logger.With(zap.String("trace_id", "startup-prefetch"))), 15*time.Second)
-		defer cancel()
-		_, source, err := getAPOD(ctx, date)
-		if err != nil {
-			logger.Warn("startup prefetch failed", zap.String("date", date), zap.Error(err))
-			return
-		}
-		logger.Info("startup prefetch success", zap.String("date", date), zap.String("source", source))
+		time.Sleep(3 * time.Second)
+		prefetchWithRetry("startup-prefetch", 0)
 	}()
+
+	return c
 }
 
-func startImageCleanupCron() {
+func startImageCleanupCron() *cron.Cron {
 	loc, _ := time.LoadLocation("America/New_York")
 	c := cron.New(cron.WithLocation(loc))
 	_, err := c.AddFunc("20 3 * * *", func() { imageStore.Cleanup() })
@@ -316,6 +325,7 @@ func startImageCleanupCron() {
 	}
 	c.Start()
 	go imageStore.Cleanup()
+	return c
 }
 
 func startMemoryCleanupTicker() {
@@ -397,6 +407,12 @@ func setupRouter() *gin.Engine {
 		}
 	}
 
+	metricsKey := strings.TrimSpace(getenv("METRICS_AUTH_KEY", ""))
+	if metricsKey == "" {
+		metricsKey = authKey
+		logger.Warn("METRICS_AUTH_KEY not set, falling back to API_AUTH_KEY")
+	}
+
 	trusted := strings.TrimSpace(getenv("TRUSTED_PROXIES", "127.0.0.1,::1"))
 	proxies := make([]string, 0, 4)
 	for _, p := range strings.Split(trusted, ",") {
@@ -418,7 +434,7 @@ func setupRouter() *gin.Engine {
 	r.Use(accessLogMiddleware())
 	r.Use(ginzap.RecoveryWithZap(logger, true))
 
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	r.GET("/metrics", apiKeyAuthMiddleware(metricsKey), gin.WrapH(promhttp.Handler()))
 	r.GET("/healthz", healthHandler)
 	r.GET("/readyz", readinessHandler)
 	r.GET("/static/apod/:filename", func(c *gin.Context) {
@@ -528,6 +544,26 @@ func setupRouter() *gin.Engine {
 	return r
 }
 
+func startDemoLimiterCleanup() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if demoLimiter == nil {
+				continue
+			}
+			now := time.Now()
+			demoLimiter.mu.Lock()
+			for k, rec := range demoLimiter.records {
+				if now.Sub(rec.windowBgn) >= demoLimiter.window {
+					delete(demoLimiter.records, k)
+				}
+			}
+			demoLimiter.mu.Unlock()
+		}
+	}()
+}
+
 func runServer() error {
 	ginMode := configureGinMode()
 	logger.Info("runtime configured", zap.String("app_env", appEnv()), zap.String("gin_mode", ginMode), zap.String("log_encoding", logEncoding()))
@@ -536,11 +572,34 @@ func runServer() error {
 	redisStore = NewRedisStore()
 	imageStore = NewImageStore(getenv("IMAGE_CACHE_DIR", "cache/images"))
 	apiLimiter = newRateLimiter()
-	startPrefetchCron()
-	startImageCleanupCron()
+	prefetchCron := startPrefetchCron()
+	cleanupCron := startImageCleanupCron()
 	startMemoryCleanupTicker()
+	startDemoLimiterCleanup()
 
 	r := setupRouter()
-	logger.Info("APOD service running", zap.String("addr", ":8080"))
-	return r.Run(":8080")
+	srv := &http.Server{Addr: ":8080", Handler: r}
+
+	go func() {
+		logger.Info("APOD service running", zap.String("addr", ":8080"))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatal("server listen failed", zap.Error(err))
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-quit
+	logger.Info("received shutdown signal", zap.String("signal", sig.String()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	prefetchCron.Stop()
+	cleanupCron.Stop()
+	if err := srv.Shutdown(ctx); err != nil {
+		logger.Error("server shutdown error", zap.Error(err))
+		return err
+	}
+	logger.Info("server exited gracefully")
+	return nil
 }

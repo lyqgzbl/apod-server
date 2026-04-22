@@ -16,6 +16,17 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+type nasaAPIResponse struct {
+	Date           string `json:"date"`
+	Title          string `json:"title"`
+	Copyright      string `json:"copyright"`
+	Explanation    string `json:"explanation"`
+	URL            string `json:"url"`
+	HDURL          string `json:"hdurl"`
+	MediaType      string `json:"media_type"`
+	ServiceVersion string `json:"service_version"`
+}
+
 type fetchResult struct {
 	apod   *APOD
 	source string
@@ -23,7 +34,7 @@ type fetchResult struct {
 
 func fetchFromNASA(ctx context.Context, date string) (*APOD, error) {
 	l := loggerFromCtx(ctx)
-	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if err := nasaLimiter.Wait(fetchCtx); err != nil {
@@ -52,28 +63,28 @@ func fetchFromNASA(ctx context.Context, date string) (*APOD, error) {
 		return nil, fmt.Errorf("NASA API error: status %d", resp.StatusCode)
 	}
 
-	var result map[string]interface{}
+	var result nasaAPIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 
-	imgURL := getString(result["url"])
+	imgURL := strings.TrimSpace(result.URL)
 	apod := &APOD{
-		Date:           getString(result["date"]),
-		Title:          getString(result["title"]),
-		Copyright:      getString(result["copyright"]),
-		Explanation:    getString(result["explanation"]),
+		Date:           strings.TrimSpace(result.Date),
+		Title:          strings.TrimSpace(result.Title),
+		Copyright:      strings.TrimSpace(result.Copyright),
+		Explanation:    strings.TrimSpace(result.Explanation),
 		ImageURL:       imgURL,
 		OriginImage:    imgURL,
-		MediaType:      getString(result["media_type"]),
-		ServiceVersion: getString(result["service_version"]),
+		MediaType:      strings.TrimSpace(result.MediaType),
+		ServiceVersion: strings.TrimSpace(result.ServiceVersion),
 	}
 	if apod.ServiceVersion == "" {
 		apod.ServiceVersion = "v1"
 	}
 	if len(apod.Explanation) < 50 {
 		apodParseFailTotal.WithLabelValues("nasa").Inc()
-		l.Error("invalid nasa payload", zap.String("date", date))
+		l.Warn("invalid nasa payload", zap.String("date", date))
 		return nil, fmt.Errorf("invalid NASA data")
 	}
 	return apod, nil
@@ -119,7 +130,7 @@ func fetchFromWeb(ctx context.Context, date time.Time) (*APOD, error) {
 
 	if len(apod.Explanation) < 80 {
 		apodParseFailTotal.WithLabelValues("web").Inc()
-		l.Error("parse apod page failed", zap.String("date", apod.Date))
+		l.Warn("parse apod page failed", zap.String("date", apod.Date))
 		return nil, fmt.Errorf("parse failed")
 	}
 	return apod, nil
@@ -273,7 +284,8 @@ func realFetchLogic(ctx context.Context, dateStr string, date time.Time) (*APOD,
 		cache.Set(dateStr, apod)
 		redisStore.Set(dateStr, apod)
 		if apod.MediaType == "image" {
-			go imageStore.Ensure(ctx, dateStr, apod.OriginImage)
+			bgCtx := withLogger(context.Background(), l)
+			go imageStore.Ensure(bgCtx, dateStr, apod.OriginImage)
 		}
 		return apod, "nasa", nil
 	} else {
@@ -288,7 +300,8 @@ func realFetchLogic(ctx context.Context, dateStr string, date time.Time) (*APOD,
 		cache.Set(dateStr, apod)
 		redisStore.Set(dateStr, apod)
 		if apod.MediaType == "image" {
-			go imageStore.Ensure(ctx, dateStr, apod.OriginImage)
+			bgCtx := withLogger(context.Background(), l)
+			go imageStore.Ensure(bgCtx, dateStr, apod.OriginImage)
 		}
 		return apod, "web", nil
 	} else {
@@ -303,7 +316,7 @@ func realFetchLogic(ctx context.Context, dateStr string, date time.Time) (*APOD,
 		return last, "redis-fallback", nil
 	}
 	apodFetchFailTotal.WithLabelValues("all").Inc()
-	l.Error("all apod sources failed", zap.String("date", dateStr))
+	l.Warn("all apod sources failed", zap.String("date", dateStr))
 	return nil, "failed", fmt.Errorf("all sources failed")
 }
 

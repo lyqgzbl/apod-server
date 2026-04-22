@@ -15,6 +15,7 @@ const (
 	redisAPODPrefix   = "apod:data:"
 	redisLastDate     = "apod:last_date"
 	redisTTL          = 30 * 24 * time.Hour
+	redisTodayTTL     = 48 * time.Hour
 	defaultUA         = "apod-mirror/1.0"
 	redisFailWindow   = 5 * time.Second
 	redisFailMax      = 3

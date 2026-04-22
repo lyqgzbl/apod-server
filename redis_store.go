@@ -204,9 +204,9 @@ func (r *RedisStore) Set(date string, apod *APOD) {
 
 func (r *RedisStore) ttlForDate(date string) time.Duration {
 	if isToday(date) {
-		return redisTTL
+		return redisTodayTTL
 	}
-	return 0
+	return redisTTL
 }
 
 func (r *RedisStore) GetLast() *APOD {

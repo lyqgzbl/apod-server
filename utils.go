@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"net"
 	"net/http"
@@ -54,11 +54,6 @@ func getNasaTime() time.Time {
 	return time.Now().In(loc)
 }
 
-func getString(v interface{}) string {
-	s, _ := v.(string)
-	return strings.TrimSpace(s)
-}
-
 func getenv(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
@@ -91,7 +86,7 @@ func getenvFloat64(key string, fallback float64) float64 {
 }
 
 func buildETag(parts ...string) string {
-	h := sha1.New()
+	h := sha256.New()
 	for _, p := range parts {
 		_, _ = h.Write([]byte(p))
 		_, _ = h.Write([]byte("|"))

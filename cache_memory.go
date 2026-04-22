@@ -52,6 +52,13 @@ func (c *Cache) Get(key string) *APOD {
 		c.mu.Unlock()
 		return nil
 	}
+	// Update lastAccess for LRU accuracy
+	c.mu.Lock()
+	if cur, exists := c.data[key]; exists {
+		cur.lastAccess = now
+		c.data[key] = cur
+	}
+	c.mu.Unlock()
 	copy := *item.data
 	copy.Cached = true
 	return &copy
