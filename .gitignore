@@ -5,3 +5,10 @@
 *.jpg
 
 apod-server
+
+# IDE
+.vscode/
+.idea/
+
+# OpenCode plans
+.opencode/
