@@ -18,24 +18,50 @@
 
 ```
 .
-├── configs/              # 配置文件
-│   └── .env.example    # 环境变量示例
-├── deployments/        # 部署配置
-│   ├── Dockerfile     # 生产镜像构建
-│   └── docker-compose.yml # 应用 + Redis 本地编排
-├── .github/           # GitHub Actions
-├── main.go            # 启动入口
-├── app_state.go       # 全局常量与运行时状态
-├── cache_memory.go   # 内存缓存（LRU + TTL）
-├── fetch.go          # NASA/Web 抓取与解析
-├── image_store.go    # 图片缓存与清理
-├── logging.go        # 日志配置
-├── model.go          # 数据模型
-├── redis_store.go    # Redis 持久缓存（含熔断）
-├── server.go        # HTTP 路由、中间件、定时任务、优雅关闭
-├── server_test.go   # 测试
-└── utils.go         # 工具函数与上下文日志
+├── main.go                          # 入口（极简，仅组装依赖）
+├── internal/
+│   ├── app/
+│   │   └── app.go                   # 依赖组装：NewApp() 创建所有服务实例
+│   ├── model/
+│   │   └── model.go                 # 数据结构：APOD, APODResponse
+│   ├── config/
+│   │   └── config.go                # 环境变量读取：Getenv, GetenvInt, AppEnv, IsProdEnv
+│   ├── log/
+│   │   ├── logger.go                # 日志配置：NewAppLogger, ConfigureGinMode
+│   │   └── ctxlog.go                # Context Logger：WithLogger, LoggerFromCtx
+│   ├── httputil/
+│   │   └── httputil.go              # HTTP 工具：RealIP, BaseURL, BuildETag, GetNasaTime, IsToday
+│   ├── store/
+│   │   ├── iface.go                 # 存储接口：Cache, KVStore
+│   │   ├── memory.go                # MemoryCache 实现 Cache 接口（LRU + TTL）
+│   │   └── redis.go                 # RedisStore 实现 KVStore 接口（含熔断）
+│   ├── image/
+│   │   └── service.go               # 图片服务：下载、缓存、服务、清理
+│   ├── fetch/
+│   │   ├── service.go               # 业务核心：GetAPOD、NASA API / Web 抓取、HTML 解析
+│   │   └── present.go               # API 输出：PresentAPOD
+│   └── server/
+│       ├── api/
+│       │   ├── server.go            # HTTP 服务：路由注册、优雅关闭
+│       │   ├── handler.go           # 请求处理：health, readiness, APOD, 图片
+│       │   └── middleware.go        # 中间件：认证、限流、Trace ID、访问日志
+│       └── cron/
+│           └── cron.go              # 定时任务：预抓取、缓存清理、DemoIPLimiter
+├── configs/
+│   └── .env.example                 # 环境变量示例
+├── deployments/
+│   ├── Dockerfile                   # 生产镜像
+│   └── docker-compose.yml           # 应用 + Redis 编排
+└── .github/                         # GitHub Actions
 ```
+
+### 架构设计
+
+- **依赖注入**：所有服务通过 `app.NewApp()` 组装，无全局可变状态
+- **接口隔离**：`store.Cache` / `store.KVStore` 为接口，实现可替换、可 Mock
+- **包职责单一**：HTTP 层（`server/api`）、定时任务（`server/cron`）、业务逻辑（`fetch`）、数据存储（`store`）、图片服务（`image`）各自独立
+- **Prometheus 指标各包自管**：`fetch` 和 `image` 包各自定义并注册指标，由 `app.NewApp()` 显式调用 `RegisterMetrics()`
+- **零环路依赖**：DAG 从 `main → app → server → fetch → store/image → model/config/log/httputil`
 
 ### 2. 运行服务
 
