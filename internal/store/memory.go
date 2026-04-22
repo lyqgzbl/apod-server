@@ -1,42 +1,50 @@
-package main
+package store
 
 import (
 	"sort"
 	"sync"
 	"time"
+
+	"apod-server/internal/httputil"
+	"apod-server/internal/model"
 )
 
 type cacheItem struct {
-	data       *APOD
+	data       *model.APOD
 	expiredAt  time.Time
 	permanent  bool
 	lastAccess time.Time
 }
 
-type Cache struct {
+// MemoryCache is an in-memory LRU+TTL cache implementing the Cache interface.
+type MemoryCache struct {
 	mu       sync.RWMutex
 	data     map[string]cacheItem
 	todayTTL time.Duration
 	maxItems int
+	evictPct int
 }
 
-func NewCache() *Cache {
-	ttlMinutes := getenvInt("MEMORY_CACHE_TTL_MINUTES", 180)
+// NewMemoryCache creates a new MemoryCache.
+func NewMemoryCache(ttlMinutes, maxItems, evictPct int) *MemoryCache {
 	if ttlMinutes <= 0 {
 		ttlMinutes = 180
 	}
-	maxItems := getenvInt("MEMORY_CACHE_MAX_ITEMS", 2000)
 	if maxItems <= 0 {
 		maxItems = 2000
 	}
-	return &Cache{data: make(map[string]cacheItem), todayTTL: time.Duration(ttlMinutes) * time.Minute, maxItems: maxItems}
+	if evictPct <= 0 {
+		evictPct = 10
+	}
+	return &MemoryCache{
+		data:     make(map[string]cacheItem),
+		todayTTL: time.Duration(ttlMinutes) * time.Minute,
+		maxItems: maxItems,
+		evictPct: evictPct,
+	}
 }
 
-func isToday(date string) bool {
-	return date == getNasaTime().Format("2006-01-02")
-}
-
-func (c *Cache) Get(key string) *APOD {
+func (c *MemoryCache) Get(key string) *model.APOD {
 	now := time.Now()
 	c.mu.RLock()
 	item, ok := c.data[key]
@@ -59,20 +67,20 @@ func (c *Cache) Get(key string) *APOD {
 		c.data[key] = cur
 	}
 	c.mu.Unlock()
-	copy := *item.data
-	copy.Cached = true
-	return &copy
+	cp := *item.data
+	cp.Cached = true
+	return &cp
 }
 
-func (c *Cache) Set(key string, value *APOD) {
+func (c *MemoryCache) Set(key string, value *model.APOD) {
 	if value == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	copy := *value
-	copy.Cached = false
-	item := cacheItem{data: &copy, permanent: !isToday(key), lastAccess: time.Now()}
+	cp := *value
+	cp.Cached = false
+	item := cacheItem{data: &cp, permanent: !httputil.IsToday(key), lastAccess: time.Now()}
 	if !item.permanent {
 		item.expiredAt = time.Now().Add(c.todayTTL)
 	}
@@ -80,11 +88,11 @@ func (c *Cache) Set(key string, value *APOD) {
 	c.evictLocked()
 }
 
-func (c *Cache) GetLast() *APOD {
+func (c *MemoryCache) GetLast() *model.APOD {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var latest *APOD
+	var latest *model.APOD
 	for k, item := range c.data {
 		if !item.permanent && now.After(item.expiredAt) {
 			delete(c.data, k)
@@ -97,12 +105,12 @@ func (c *Cache) GetLast() *APOD {
 	if latest == nil {
 		return nil
 	}
-	copy := *latest
-	copy.Cached = true
-	return &copy
+	cp := *latest
+	cp.Cached = true
+	return &cp
 }
 
-func (c *Cache) Cleanup() {
+func (c *MemoryCache) Cleanup() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
@@ -114,12 +122,12 @@ func (c *Cache) Cleanup() {
 	c.evictLocked()
 }
 
-func (c *Cache) evictLocked() {
+func (c *MemoryCache) evictLocked() {
 	if c.maxItems <= 0 || len(c.data) <= c.maxItems {
 		return
 	}
 	overflow := len(c.data) - c.maxItems
-	batch := c.maxItems * memoryEvictStep / 100
+	batch := c.maxItems * c.evictPct / 100
 	if batch < 1 {
 		batch = 1
 	}

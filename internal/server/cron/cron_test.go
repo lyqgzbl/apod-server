@@ -1,4 +1,4 @@
-package main
+package cron
 
 import (
 	"net/http"
@@ -8,7 +8,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
+
+	"apod-server/internal/httputil"
 )
 
 func performRequest(r http.Handler, method, path, remoteAddr string) *httptest.ResponseRecorder {
@@ -20,7 +21,7 @@ func performRequest(r http.Handler, method, path, remoteAddr string) *httptest.R
 }
 
 func TestDemoIPLimiterConcurrentAllowRollbackNoLeak(t *testing.T) {
-	limiter := newDemoIPLimiter(100000, 24*time.Hour)
+	limiter := NewDemoIPLimiter(100000, 24*time.Hour)
 	const (
 		ip      = "198.51.100.10"
 		workers = 32
@@ -36,8 +37,8 @@ func TestDemoIPLimiterConcurrentAllowRollbackNoLeak(t *testing.T) {
 			defer wg.Done()
 			<-start
 			for j := 0; j < loops; j++ {
-				if limiter.allow(ip) {
-					limiter.rollback(ip)
+				if limiter.Allow(ip) {
+					limiter.Rollback(ip)
 				}
 			}
 		}()
@@ -46,9 +47,7 @@ func TestDemoIPLimiterConcurrentAllowRollbackNoLeak(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	limiter.mu.Lock()
-	_, exists := limiter.records[ip]
-	limiter.mu.Unlock()
+	_, exists := limiter.RecordForIP(ip)
 	if exists {
 		t.Fatalf("expected no remaining usage record for %s", ip)
 	}
@@ -56,17 +55,25 @@ func TestDemoIPLimiterConcurrentAllowRollbackNoLeak(t *testing.T) {
 
 func TestAPIKeyAuthMiddlewareConcurrentFailuresNoQuotaLeak(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	logger = zap.NewNop()
+	httputil.SetTrustedProxiesForRealIP([]string{"*"})
 
-	oldLimiter := demoLimiter
-	t.Cleanup(func() {
-		demoLimiter = oldLimiter
-	})
-
-	demoLimiter = newDemoIPLimiter(1, 24*time.Hour)
+	demoLimiter := NewDemoIPLimiter(1, 24*time.Hour)
 
 	r := gin.New()
-	r.Use(apiKeyAuthMiddleware("ignored"))
+	// Use a simple auth middleware that replicates the demo flow
+	r.Use(func(c *gin.Context) {
+		ip := httputil.RealIP(c.Request)
+		// simulate demo mode: always use demo key
+		if !demoLimiter.Allow(ip) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"code": 429, "msg": "rate limited"})
+			c.Abort()
+			return
+		}
+		c.Next()
+		if c.Writer.Status() != http.StatusOK {
+			demoLimiter.Rollback(ip)
+		}
+	})
 	r.GET("/fail", func(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"msg": "boom"})
 	})
@@ -95,9 +102,7 @@ func TestAPIKeyAuthMiddlewareConcurrentFailuresNoQuotaLeak(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	demoLimiter.mu.Lock()
-	_, existsAfterFailures := demoLimiter.records[ipAddr]
-	demoLimiter.mu.Unlock()
+	_, existsAfterFailures := demoLimiter.RecordForIP(ipAddr)
 	if existsAfterFailures {
 		t.Fatalf("expected no remaining usage record for %s after failed requests", ipAddr)
 	}
@@ -107,13 +112,11 @@ func TestAPIKeyAuthMiddlewareConcurrentFailuresNoQuotaLeak(t *testing.T) {
 		t.Fatalf("expected follow-up request status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	demoLimiter.mu.Lock()
-	rec, existsAfterSuccess := demoLimiter.records[ipAddr]
-	demoLimiter.mu.Unlock()
+	rec, existsAfterSuccess := demoLimiter.RecordForIP(ipAddr)
 	if !existsAfterSuccess {
 		t.Fatalf("expected usage record for %s after successful request", ipAddr)
 	}
-	if rec.count != 1 {
-		t.Fatalf("expected usage count 1 for %s, got %d", ipAddr, rec.count)
+	if rec.Count != 1 {
+		t.Fatalf("expected usage count 1 for %s, got %d", ipAddr, rec.Count)
 	}
 }

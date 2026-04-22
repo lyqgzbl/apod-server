@@ -1,26 +1,51 @@
-package main
+package store
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"apod-server/internal/httputil"
+	"apod-server/internal/model"
 )
 
-type RedisStore struct {
-	client     *redis.Client
-	enabled    bool
-	mu         sync.Mutex
-	failCount  int
-	openUntil  time.Time
-	openWindow time.Duration
+// RedisStoreConfig holds configuration for NewRedisStore.
+type RedisStoreConfig struct {
+	Addr        string
+	Password    string
+	DB          int
+	Prefix      string
+	LastDateKey string
+	TTL         time.Duration
+	TodayTTL    time.Duration
+	FailWindow  time.Duration
+	FailMax     int
+	Logger      *zap.Logger
 }
+
+// RedisStore is a Redis-backed persistent store implementing KVStore.
+type RedisStore struct {
+	client      *redis.Client
+	enabled     bool
+	mu          sync.Mutex
+	failCount   int
+	openUntil   time.Time
+	openWindow  time.Duration
+	failMax     int
+	prefix      string
+	lastDateKey string
+	ttl         time.Duration
+	todayTTL    time.Duration
+	logger      *zap.Logger
+}
+
+// --- redis client log suppression ---
 
 var (
 	redisClientLogMu         sync.Mutex
@@ -28,9 +53,11 @@ var (
 	redisClientLogSuppressed int
 )
 
-type redisZapLogger struct{}
+type redisZapLogger struct {
+	logger *zap.Logger
+}
 
-func (redisZapLogger) Printf(ctx context.Context, format string, v ...interface{}) {
+func (r redisZapLogger) Printf(_ context.Context, format string, v ...interface{}) {
 	detail := sanitizeRedisLogDetail(fmt.Sprintf(format, v...))
 	if detail == "" {
 		return
@@ -39,13 +66,11 @@ func (redisZapLogger) Printf(ctx context.Context, format string, v ...interface{
 	if !emit {
 		return
 	}
-
-	l := loggerFromCtx(ctx).With(zap.String("component", "redis"))
+	l := r.logger.With(zap.String("component", "redis"))
 	fields := []zap.Field{zap.String("detail", detail)}
 	if suppressed > 0 {
 		fields = append(fields, zap.Int("suppressed", suppressed))
 	}
-
 	if isRedisConnectivityNoise(detail) {
 		l.Warn("redis client log", fields...)
 		return
@@ -62,7 +87,6 @@ func sanitizeRedisLogDetail(raw string) string {
 	if idx := strings.Index(lower, "dial tcp "); idx >= 0 {
 		return strings.TrimSpace(detail[idx:])
 	}
-
 	prefixes := []string{
 		"redis: connection pool: failed to dial after 5 attempts:",
 		"redis: connection pool:",
@@ -87,10 +111,8 @@ func isRedisConnectivityNoise(detail string) bool {
 
 func allowRedisClientLog() (bool, int) {
 	const minInterval = 15 * time.Second
-
 	redisClientLogMu.Lock()
 	defer redisClientLogMu.Unlock()
-
 	now := time.Now()
 	if redisClientLogLast.IsZero() || now.Sub(redisClientLogLast) >= minInterval {
 		suppressed := redisClientLogSuppressed
@@ -98,27 +120,60 @@ func allowRedisClientLog() (bool, int) {
 		redisClientLogLast = now
 		return true, suppressed
 	}
-
 	redisClientLogSuppressed++
 	return false, 0
 }
 
-func NewRedisStore() *RedisStore {
-	addr := getenv("REDIS_ADDR", "127.0.0.1:6379")
-	password := getenv("REDIS_PASSWORD", "")
-	db, _ := strconv.Atoi(getenv("REDIS_DB", "0"))
-	redis.SetLogger(redisZapLogger{})
-	client := redis.NewClient(&redis.Options{Addr: addr, Password: password, DB: db})
+// --- constructor ---
+
+// NewRedisStore creates a RedisStore. Returns a disabled store if connection fails.
+func NewRedisStore(cfg RedisStoreConfig) *RedisStore {
+	if cfg.Prefix == "" {
+		cfg.Prefix = "apod:data:"
+	}
+	if cfg.LastDateKey == "" {
+		cfg.LastDateKey = "apod:last_date"
+	}
+	if cfg.TTL <= 0 {
+		cfg.TTL = 30 * 24 * time.Hour
+	}
+	if cfg.TodayTTL <= 0 {
+		cfg.TodayTTL = 48 * time.Hour
+	}
+	if cfg.FailWindow <= 0 {
+		cfg.FailWindow = 5 * time.Second
+	}
+	if cfg.FailMax <= 0 {
+		cfg.FailMax = 3
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = zap.NewNop()
+	}
+
+	redis.SetLogger(redisZapLogger{logger: cfg.Logger})
+	client := redis.NewClient(&redis.Options{Addr: cfg.Addr, Password: cfg.Password, DB: cfg.DB})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
-		logger.Warn("redis disabled", zap.Error(err), zap.String("addr", addr))
-		return &RedisStore{enabled: false, openWindow: redisFailWindow}
+		cfg.Logger.Warn("redis disabled", zap.Error(err), zap.String("addr", cfg.Addr))
+		return &RedisStore{enabled: false, openWindow: cfg.FailWindow, logger: cfg.Logger}
 	}
-	logger.Info("redis connected", zap.String("addr", addr), zap.Int("db", db))
-	return &RedisStore{client: client, enabled: true, openWindow: redisFailWindow}
+	cfg.Logger.Info("redis connected", zap.String("addr", cfg.Addr), zap.Int("db", cfg.DB))
+	return &RedisStore{
+		client:      client,
+		enabled:     true,
+		openWindow:  cfg.FailWindow,
+		failMax:     cfg.FailMax,
+		prefix:      cfg.Prefix,
+		lastDateKey: cfg.LastDateKey,
+		ttl:         cfg.TTL,
+		todayTTL:    cfg.TodayTTL,
+		logger:      cfg.Logger,
+	}
 }
+
+// --- circuit breaker ---
 
 func (r *RedisStore) allowAccess() bool {
 	if !r.enabled {
@@ -140,23 +195,25 @@ func (r *RedisStore) onFailure(op string, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.failCount++
-	if r.failCount < redisFailMax {
-		logger.Warn("redis access failed", zap.String("op", op), zap.Int("fail_count", r.failCount), zap.Error(err))
+	if r.failCount < r.failMax {
+		r.logger.Warn("redis access failed", zap.String("op", op), zap.Int("fail_count", r.failCount), zap.Error(err))
 		return
 	}
 	r.openUntil = time.Now().Add(r.openWindow)
 	r.failCount = 0
-	logger.Warn("redis circuit open", zap.String("op", op), zap.Duration("open_window", r.openWindow), zap.Error(err))
+	r.logger.Warn("redis circuit open", zap.String("op", op), zap.Duration("open_window", r.openWindow), zap.Error(err))
 }
 
-func (r *RedisStore) Get(date string) *APOD {
+// --- KVStore interface ---
+
+func (r *RedisStore) Get(date string) *model.APOD {
 	if !r.allowAccess() {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	val, err := r.client.Get(ctx, redisAPODPrefix+date).Result()
+	val, err := r.client.Get(ctx, r.prefix+date).Result()
 	if err != nil {
 		if err != redis.Nil {
 			r.onFailure("get", err)
@@ -167,9 +224,9 @@ func (r *RedisStore) Get(date string) *APOD {
 	}
 	r.onSuccess()
 
-	var apod APOD
+	var apod model.APOD
 	if err := json.Unmarshal([]byte(val), &apod); err != nil {
-		logger.Warn("redis unmarshal failed", zap.Error(err), zap.String("date", date))
+		r.logger.Warn("redis unmarshal failed", zap.Error(err), zap.String("date", date))
 		return nil
 	}
 	if apod.OriginImage == "" && apod.MediaType == "image" {
@@ -179,22 +236,21 @@ func (r *RedisStore) Get(date string) *APOD {
 	return &apod
 }
 
-func (r *RedisStore) Set(date string, apod *APOD) {
+func (r *RedisStore) Set(date string, apod *model.APOD) {
 	if !r.allowAccess() || apod == nil {
 		return
 	}
 	body, err := json.Marshal(apod)
 	if err != nil {
-		logger.Warn("redis marshal failed", zap.Error(err), zap.String("date", date))
+		r.logger.Warn("redis marshal failed", zap.Error(err), zap.String("date", date))
 		return
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ttl := r.ttlForDate(date)
 	pipe := r.client.TxPipeline()
-	pipe.Set(ctx, redisAPODPrefix+date, string(body), ttl)
-	pipe.Set(ctx, redisLastDate, date, 0)
+	pipe.Set(ctx, r.prefix+date, string(body), ttl)
+	pipe.Set(ctx, r.lastDateKey, date, 0)
 	if _, err := pipe.Exec(ctx); err != nil {
 		r.onFailure("set", err)
 		return
@@ -203,20 +259,19 @@ func (r *RedisStore) Set(date string, apod *APOD) {
 }
 
 func (r *RedisStore) ttlForDate(date string) time.Duration {
-	if isToday(date) {
-		return redisTodayTTL
+	if httputil.IsToday(date) {
+		return r.todayTTL
 	}
-	return redisTTL
+	return r.ttl
 }
 
-func (r *RedisStore) GetLast() *APOD {
+func (r *RedisStore) GetLast() *model.APOD {
 	if !r.allowAccess() {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-
-	lastDate, err := r.client.Get(ctx, redisLastDate).Result()
+	lastDate, err := r.client.Get(ctx, r.lastDateKey).Result()
 	if err != nil {
 		if err != redis.Nil {
 			r.onFailure("get_last", err)

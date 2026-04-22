@@ -1,24 +1,40 @@
 package main
 
-import "go.uber.org/zap"
+import (
+	"fmt"
+
+	"go.uber.org/zap"
+
+	"apod-server/internal/app"
+	"apod-server/internal/config"
+	applog "apod-server/internal/log"
+)
 
 func main() {
-	// Configure Gin mode/output at process startup to avoid noisy default startup logs.
-	configureGinMode()
+	// Load .env FIRST so that APP_ENV, GIN_MODE, LOG_LEVEL etc. are available
+	// for ConfigureGinMode and NewAppLogger.
+	envLoadErr := config.LoadDotEnv()
 
-	var err error
-	logger, err = newAppLogger()
+	applog.ConfigureGinMode()
+
+	logger, err := applog.NewAppLogger()
 	if err != nil {
-		panic(err)
+		panic(fmt.Sprintf("init logger: %v", err))
 	}
 	defer logger.Sync()
-	logger.Info("logger initialized", zap.String("app_env", appEnv()), zap.String("log_encoding", logEncoding()))
+	logger.Info("logger initialized", zap.String("app_env", config.AppEnv()), zap.String("log_encoding", applog.LogEncoding()))
 
 	if envLoadErr != nil {
 		logger.Warn("load .env failed", zap.Error(envLoadErr))
 	}
 
-	if err := runServer(); err != nil {
+	srv, cronStop, err := app.NewApp(logger)
+	if err != nil {
+		logger.Fatal("init failed", zap.Error(err))
+	}
+	defer cronStop()
+
+	if err := srv.Run(); err != nil {
 		logger.Fatal("server exited", zap.Error(err))
 	}
 }

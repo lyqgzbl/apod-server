@@ -1,5 +1,6 @@
-package main
+package model
 
+// APOD represents internal APOD data used across the application.
 type APOD struct {
 	Date           string `json:"date"`
 	Title          string `json:"title"`
@@ -12,7 +13,7 @@ type APOD struct {
 	Cached         bool   `json:"cached"`
 }
 
-// APODResponse follows NASA APOD API response field naming.
+// APODResponse follows NASA APOD API response field naming for external output.
 type APODResponse struct {
 	Copyright      string `json:"copyright"`
 	Date           string `json:"date"`
