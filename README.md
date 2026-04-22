@@ -8,9 +8,11 @@
 - 缓存防击穿：singleflight 合并同 key 并发请求
 - 图片缓存：本地落盘，支持冷热分层清理
 - 定时任务：每日预抓取 APOD，定期清理缓存
-- 可观测性：Prometheus 指标、结构化日志、Trace ID
-- API 优化：Gzip、ETag、Cache-Control、限流
+- 可观测性：Prometheus 指标（需认证）、结构化日志、Trace ID
+- API 优化：Gzip、ETag（SHA-256）、Cache-Control、限流
+- 安全：Bearer Token 认证、常量时间密钥比较、DEMO_KEY IP 限流
 - 健康探针：healthz / readyz
+- 优雅关闭：HTTP Server + Cron 任务平滑退出
 
 ## 项目结构
 
@@ -22,33 +24,18 @@
 │   ├── Dockerfile     # 生产镜像构建
 │   └── docker-compose.yml # 应用 + Redis 本地编排
 ├── .github/           # GitHub Actions
-├── internal/
-│   ├── model/        # 数据模型
-│   │   └── model.go  # APOD 数据结构
-│   └── store/        # 存储层
-│       ├── cache/   # 内存缓存实现
-│       │   └── cache.go
-│       └── redis/   # Redis 存储实现
-│           └── store.go
 ├── main.go            # 启动入口
 ├── app_state.go       # 全局常量与运行时状态
-├── cache_memory.go   # 内存缓存（旧）
+├── cache_memory.go   # 内存缓存（LRU + TTL）
 ├── fetch.go          # NASA/Web 抓取与解析
 ├── image_store.go    # 图片缓存与清理
 ├── logging.go        # 日志配置
-├── model.go          # 数据模型（旧）
-├── redis_store.go    # Redis 持久缓存（旧）
-├── server.go        # HTTP 路由、中间件、定时任务
+├── model.go          # 数据模型
+├── redis_store.go    # Redis 持久缓存（含熔断）
+├── server.go        # HTTP 路由、中间件、定时任务、优雅关闭
 ├── server_test.go   # 测试
 └── utils.go         # 工具函数与上下文日志
 ```
-
-### 代码说明
-
-- `internal/model/`: 独立数据模型包，可被外部项目引用
-- `internal/store/cache`: 内存缓存实现，支持 TTL 和容量淘汰
-- `internal/store/redis`: Redis 存储实现，支持熔断机制
-- 根目录保留旧版实现以保持向后兼容
 
 ### 2. 运行服务
 
@@ -56,7 +43,7 @@
 go run .
 ```
 
-默认监听 `:8080`。
+默认监听 `:8080`。服务支持 `SIGINT` / `SIGTERM` 信号优雅关闭。
 
 ### 3. 测试接口
 
@@ -65,7 +52,7 @@ curl -H 'Authorization: Bearer changeme' 'http://127.0.0.1:8080/v1/apod'
 curl 'http://127.0.0.1:8080/v1/apod' # 不带 Authorization 时自动使用 DEMO_KEY
 curl 'http://127.0.0.1:8080/healthz'
 curl 'http://127.0.0.1:8080/readyz'
-curl 'http://127.0.0.1:8080/metrics'
+curl -H 'Authorization: Bearer your_metrics_key' 'http://127.0.0.1:8080/metrics'
 ```
 
 ## Docker 部署
@@ -137,7 +124,7 @@ NASA_API_KEY=your_api_key docker compose -f deployments/docker-compose.yml up -d
 - `GET /v1/apod?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`）
 - `GET /v1/apod/image?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`，兼容接口，302 跳转到静态图片）
 - `GET /static/apod/YYYY-MM-DD.jpg`（带扩展名图片直链，便于 CDN/客户端识别）
-- `GET /metrics`
+- `GET /metrics`（Header: `Authorization: Bearer METRICS_KEY`，独立认证，未配置 `METRICS_AUTH_KEY` 时使用 `API_AUTH_KEY`）
 - `GET /healthz`
 - `GET /readyz`
 
@@ -169,6 +156,7 @@ NASA_API_KEY=your_api_key docker compose -f deployments/docker-compose.yml up -d
 - `TRUSTED_PROXIES`: 可信代理 IP 或 CIDR（逗号分隔）。仅来自这些代理的 `X-Forwarded-For`/`X-Real-IP` 才会被信任。默认 `127.0.0.1,::1`
 - `NASA_API_KEY`: NASA API Key，默认 `DEMO_KEY`
 - `API_AUTH_KEY`: 业务 API 访问密钥，默认 `changeme`
+- `METRICS_AUTH_KEY`: `/metrics` 端点独立访问密钥，未设置时回退到 `API_AUTH_KEY`
 - `DEMO_KEY_LIMIT_PER_24H`: 未携带 Authorization 时（自动使用 `DEMO_KEY`）每个 IP 24 小时可调用 `/v1/apod` + `/v1/apod/image` 的 HTTP 200 响应总次数，默认 `5`
 - `API_RATE_LIMIT_RPS`: API 每秒令牌速率，默认 `8`
 - `API_RATE_LIMIT_BURST`: API 突发令牌桶容量，默认 `16`
@@ -221,8 +209,8 @@ curl -H 'Authorization: Bearer changeme' 'http://127.0.0.1:8080/v1/apod'
 
 ## 缓存策略说明
 
-- APOD 今日数据：内存和 Redis 使用 TTL
-- APOD 历史数据：默认长期缓存（通过容量控制清理）
+- APOD 今日数据：内存使用 TTL（默认 3 小时），Redis TTL 48 小时
+- APOD 历史数据：内存长期缓存（通过 LRU 容量控制清理），Redis TTL 30 天
 - 图片缓存：最近 7 天视为热数据，不参与清理；历史数据按时间和容量策略清理
 
 ## 观测建议
@@ -250,5 +238,7 @@ curl -H 'Authorization: Bearer changeme' 'http://127.0.0.1:8080/v1/apod'
 
 - 使用真实 `NASA_API_KEY`，避免 `DEMO_KEY` 配额瓶颈
 - 生产环境启用 Redis
+- 生产环境务必设置 `API_AUTH_KEY` 为强密码（非 `changeme`）
 - 如在容器中运行，镜像可保持轻量，时区数据已通过 `time/tzdata` 内置
 - 前置网关可再叠加 IP 级限流
+- 服务支持 `SIGINT` / `SIGTERM` 优雅关闭，部署时可安全执行滚动更新
