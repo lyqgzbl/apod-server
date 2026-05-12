@@ -108,7 +108,8 @@ docker run --rm -p 8080:8080 \
 ### 3. 使用 Docker Compose（推荐）
 
 ```bash
-docker compose -f deployments/docker-compose.yml up -d --build
+API_AUTH_KEY=your_app_api_key NASA_API_KEY=your_nasa_api_key \
+	docker compose -f deployments/docker-compose.yml up -d --build
 ```
 
 查看状态与日志：
@@ -142,14 +143,14 @@ docker compose -f deployments/docker-compose.yml down -v
 示例：
 
 ```bash
-NASA_API_KEY=your_api_key docker compose -f deployments/docker-compose.yml up -d
+API_AUTH_KEY=your_app_api_key NASA_API_KEY=your_api_key docker compose -f deployments/docker-compose.yml up -d
 ```
 
 ## 主要接口
 
 - `GET /v1/apod?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`）
 - `GET /v1/apod/image?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`，兼容接口，302 跳转到静态图片）
-- `GET /static/apod/YYYY-MM-DD.jpg`（带扩展名图片直链，便于 CDN/客户端识别）
+- `GET /static/apod/YYYY-MM-DD.jpg`（公开图片直链，只返回本地已缓存图片，不触发上游抓取）
 - `GET /metrics`（Header: `Authorization: Bearer METRICS_KEY`，独立认证，未配置 `METRICS_AUTH_KEY` 时使用 `API_AUTH_KEY`）
 - `GET /healthz`
 - `GET /readyz`
@@ -168,6 +169,7 @@ NASA_API_KEY=your_api_key docker compose -f deployments/docker-compose.yml up -d
 图片接口缓存说明：
 
 - `/v1/apod/image` 与 `/static/apod/YYYY-MM-DD.jpg` 返回 `Cache-Control: public, max-age=86400`
+- `/static/apod/YYYY-MM-DD.jpg` 未命中本地图片缓存时返回 `404 image not found`
 
 ## 环境变量
 
@@ -179,10 +181,10 @@ NASA_API_KEY=your_api_key docker compose -f deployments/docker-compose.yml up -d
 - `APP_ENV`: 运行环境，`development` 或 `production`，默认 `development`
 - `LOG_LEVEL`: 日志级别，默认开发环境 `debug`，生产环境 `info`
 - `LOG_COLOR`: 控制台日志等级着色开关（`true/false`），默认自动检测终端
-- `TRUSTED_PROXIES`: 可信代理 IP 或 CIDR（逗号分隔）。仅来自这些代理的 `X-Forwarded-For`/`X-Real-IP` 才会被信任。默认 `127.0.0.1,::1`
+- `TRUSTED_PROXIES`: 可信代理 IP 或 CIDR（逗号分隔）。仅来自这些代理的 `X-Forwarded-For`/`X-Real-IP`/`X-Forwarded-Host`/`X-Forwarded-Proto` 才会被信任。默认 `127.0.0.1,::1`
 - `NASA_API_KEY`: NASA API Key，默认 `DEMO_KEY`
 - `API_AUTH_KEY`: 业务 API 访问密钥，默认 `changeme`
-- `METRICS_AUTH_KEY`: `/metrics` 端点独立访问密钥，未设置时回退到 `API_AUTH_KEY`
+- `METRICS_AUTH_KEY`: `/metrics` 端点独立访问密钥，未设置时回退到 `API_AUTH_KEY`；生产环境建议单独配置
 - `DEMO_KEY_LIMIT_PER_24H`: 未携带 Authorization 时（自动使用 `DEMO_KEY`）每个 IP 24 小时可调用 `/v1/apod` + `/v1/apod/image` 的 HTTP 200 响应总次数，默认 `5`
 - `API_RATE_LIMIT_RPS`: API 每秒令牌速率，默认 `8`
 - `API_RATE_LIMIT_BURST`: API 突发令牌桶容量，默认 `16`
@@ -232,6 +234,7 @@ curl -H 'Authorization: Bearer changeme' 'http://127.0.0.1:8080/v1/apod'
 - `IMAGE_CACHE_DIR`: 默认 `cache/images`
 - `IMAGE_CACHE_MAX_FILES`: 最大文件数，默认 `1000`
 - `IMAGE_CACHE_MAX_AGE_HOURS`: 冷数据最大保留时长（小时），默认 `720`（30 天）
+- `IMAGE_DOWNLOAD_MAX_BYTES`: 单张图片下载大小上限，默认 `26214400`（25 MiB）
 
 ## 缓存策略说明
 

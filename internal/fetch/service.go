@@ -137,6 +137,7 @@ func (s *Service) GetAPOD(ctx context.Context, dateStr string) (*model.APOD, str
 
 	var date time.Time
 	var err error
+	explicitDate := dateStr != ""
 	if dateStr == "" {
 		date = httputil.GetNasaTime()
 		dateStr = date.Format("2006-01-02")
@@ -168,7 +169,7 @@ func (s *Service) GetAPOD(ctx context.Context, dateStr string) (*model.APOD, str
 			return nil, ctx.Err()
 		default:
 		}
-		apod, source, fetchErr := s.realFetchLogic(ctx, dateStr, date)
+		apod, source, fetchErr := s.realFetchLogic(ctx, dateStr, date, !explicitDate)
 		if fetchErr != nil {
 			return nil, fetchErr
 		}
@@ -197,7 +198,7 @@ func (s *Service) GetAPOD(ctx context.Context, dateStr string) (*model.APOD, str
 	return res.apod, res.source, nil
 }
 
-func (s *Service) realFetchLogic(ctx context.Context, dateStr string, date time.Time) (*model.APOD, string, error) {
+func (s *Service) realFetchLogic(ctx context.Context, dateStr string, date time.Time, allowFallback bool) (*model.APOD, string, error) {
 	l := applog.LoggerFromCtx(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, "canceled", err
@@ -231,12 +232,14 @@ func (s *Service) realFetchLogic(ctx context.Context, dateStr string, date time.
 		l.Warn("fetch web failed", zap.String("date", dateStr), zap.Error(err))
 	}
 
-	if last := s.Cache.GetLast(); last != nil {
-		return last, "memory-fallback", nil
-	}
-	if last := s.KV.GetLast(); last != nil {
-		s.Cache.Set(last.Date, last)
-		return last, "redis-fallback", nil
+	if allowFallback {
+		if last := s.Cache.GetLast(); last != nil {
+			return last, "memory-fallback", nil
+		}
+		if last := s.KV.GetLast(); last != nil {
+			s.Cache.Set(last.Date, last)
+			return last, "redis-fallback", nil
+		}
 	}
 	apodFetchFailTotal.WithLabelValues("all").Inc()
 	l.Warn("all apod sources failed", zap.String("date", dateStr))
@@ -313,8 +316,8 @@ func (s *Service) fetchFromWeb(ctx context.Context, date time.Time) (*model.APOD
 	fetchCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 
-	url := fmt.Sprintf("https://apod.nasa.gov/apod/ap%s.html", date.Format("060102"))
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	pageURL := fmt.Sprintf("https://apod.nasa.gov/apod/ap%s.html", date.Format("060102"))
+	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +343,7 @@ func (s *Service) fetchFromWeb(ctx context.Context, date time.Time) (*model.APOD
 
 	apod := &model.APOD{Date: date.Format("2006-01-02")}
 	apod.Title = strings.TrimSpace(doc.Find("center b").First().Text())
-	apod.ImageURL, apod.MediaType = extractMedia(doc)
+	apod.ImageURL, apod.MediaType = extractMedia(doc, pageURL)
 	apod.OriginImage = apod.ImageURL
 	apod.Copyright = extractCopyright(doc)
 	apod.Explanation = extractExplanation(doc)
@@ -356,18 +359,34 @@ func (s *Service) fetchFromWeb(ctx context.Context, date time.Time) (*model.APOD
 
 // --- HTML parsers ---
 
-func extractMedia(doc *goquery.Document) (string, string) {
+func extractMedia(doc *goquery.Document, pageURL string) (string, string) {
 	if img := doc.Find("center img").First(); img.Length() > 0 {
 		if src, ok := img.Attr("src"); ok {
-			return "https://apod.nasa.gov/apod/" + src, "image"
+			return resolveMediaURL(pageURL, src), "image"
 		}
 	}
 	if iframe := doc.Find("iframe").First(); iframe.Length() > 0 {
 		if src, ok := iframe.Attr("src"); ok {
-			return src, "video"
+			return resolveMediaURL(pageURL, src), "video"
 		}
 	}
 	return "", "other"
+}
+
+func resolveMediaURL(pageURL, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	base, err := neturl.Parse(pageURL)
+	if err != nil {
+		return raw
+	}
+	ref, err := neturl.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return base.ResolveReference(ref).String()
 }
 
 func extractCopyright(doc *goquery.Document) string {

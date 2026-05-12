@@ -81,7 +81,7 @@ func (s *Server) setupRouter() *gin.Engine {
 	r.GET("/metrics", strictAuthMiddleware(cfg.MetricsKey), gin.WrapH(promhttp.Handler()))
 	r.GET("/healthz", healthHandler)
 	r.GET("/readyz", readinessHandler(cfg.KV, cfg.Image))
-	r.GET("/static/apod/:filename", staticImageHandler(cfg.Fetch, cfg.Image))
+	r.GET("/static/apod/:filename", staticImageHandler(cfg.Image))
 
 	authMW := apiKeyAuthMiddleware(cfg.AuthKey, cfg.DemoLimiter)
 	rateMW := rateLimitMiddleware(cfg.RateLimiter)

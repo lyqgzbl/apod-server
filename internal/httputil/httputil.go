@@ -135,9 +135,11 @@ func RealIP(r *http.Request) string {
 
 // BaseURL returns the base URL (scheme + host) from the request.
 func BaseURL(r *http.Request) string {
-	scheme := detectScheme(r)
+	trustedProxy := isTrustedProxyIP(splitClientAndPort(r.RemoteAddr))
+	scheme := detectScheme(r, trustedProxy)
 	host := r.Host
-	if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
+	if trustedProxy && r.Header.Get("X-Forwarded-Host") != "" {
+		xfh := r.Header.Get("X-Forwarded-Host")
 		host = firstCSV(xfh)
 	}
 	return scheme + "://" + host
@@ -197,9 +199,12 @@ func forwardedProto(v string) string {
 	return ""
 }
 
-func detectScheme(r *http.Request) string {
+func detectScheme(r *http.Request, trustedProxy bool) string {
 	if r.TLS != nil {
 		return "https"
+	}
+	if !trustedProxy {
+		return "http"
 	}
 	if p := strings.ToLower(firstCSV(r.Header.Get("X-Forwarded-Proto"))); p == "https" || p == "http" {
 		return p

@@ -89,7 +89,7 @@ func apodHandler(fetchSvc *fetch.Service) gin.HandlerFunc {
 			} else {
 				l.Warn("get apod failed", zap.String("date", date), zap.String("source", source), zap.Error(err))
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": err.Error()})
+			c.JSON(http.StatusBadGateway, gin.H{"code": 502, "msg": err.Error()})
 			return
 		}
 
@@ -112,9 +112,7 @@ func imageRedirectHandler(fetchSvc *fetch.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		l := RequestLogger(c)
 		date := strings.TrimSpace(c.Query("date"))
-		if date == "" {
-			date = httputil.GetNasaTime().Format("2006-01-02")
-		} else if !httputil.IsValidISODate(date) {
+		if date != "" && !httputil.IsValidISODate(date) {
 			badDateRequest(c)
 			return
 		}
@@ -125,7 +123,7 @@ func imageRedirectHandler(fetchSvc *fetch.Service) gin.HandlerFunc {
 				return
 			}
 			l.Warn("get apod for image failed", zap.String("date", date), zap.String("source", source), zap.Error(err))
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": err.Error()})
+			c.JSON(http.StatusBadGateway, gin.H{"code": 502, "msg": err.Error()})
 			return
 		}
 		if apod.MediaType != "image" {
@@ -137,7 +135,7 @@ func imageRedirectHandler(fetchSvc *fetch.Service) gin.HandlerFunc {
 	}
 }
 
-func staticImageHandler(fetchSvc *fetch.Service, img *image.Service) gin.HandlerFunc {
+func staticImageHandler(img *image.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		filename := strings.TrimSpace(c.Param("filename"))
 		lowerFilename := strings.ToLower(filename)
@@ -150,27 +148,7 @@ func staticImageHandler(fetchSvc *fetch.Service, img *image.Service) gin.Handler
 			badDateRequest(c)
 			return
 		}
-
-		apod, source, err := fetchSvc.GetAPOD(c.Request.Context(), date)
-		if err != nil {
-			if source == "invalid" {
-				badDateRequest(c)
-				return
-			}
-			RequestLogger(c).Warn("get apod for static image failed", zap.String("date", date), zap.String("source", source), zap.Error(err))
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": err.Error()})
-			return
-		}
-		if apod.MediaType != "image" {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "media type is not image"})
-			return
-		}
-
-		origin := apod.OriginImage
-		if origin == "" {
-			origin = apod.ImageURL
-		}
 		c.Header("Cache-Control", "public, max-age=86400")
-		img.Serve(c, apod.Date, origin)
+		img.ServeCached(c, date)
 	}
 }

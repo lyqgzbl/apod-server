@@ -70,6 +70,7 @@ func NewApp(logger *zap.Logger) (srv *api.Server, cronStop func(), err error) {
 		Dir:             config.Getenv("IMAGE_CACHE_DIR", "cache/images"),
 		MaxFiles:        config.GetenvInt("IMAGE_CACHE_MAX_FILES", 1000),
 		MaxAgeHours:     config.GetenvInt("IMAGE_CACHE_MAX_AGE_HOURS", 720),
+		MaxBytes:        int64(config.GetenvInt("IMAGE_DOWNLOAD_MAX_BYTES", 25*1024*1024)),
 		HotDays:         7,
 		DownloadTimeout: 20 * time.Second,
 		UserAgent:       "apod-mirror/1.0",

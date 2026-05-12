@@ -28,6 +28,7 @@ type Config struct {
 	Dir             string
 	MaxFiles        int
 	MaxAgeHours     int
+	MaxBytes        int64
 	HotDays         int
 	DownloadTimeout time.Duration
 	UserAgent       string
@@ -43,6 +44,7 @@ type Service struct {
 	client   *http.Client
 	maxFiles int
 	maxAge   time.Duration
+	maxBytes int64
 	hotDays  int
 	timeout  time.Duration
 	ua       string
@@ -102,6 +104,9 @@ func NewService(cfg Config) *Service {
 	if cfg.MaxAgeHours <= 0 {
 		cfg.MaxAgeHours = 720
 	}
+	if cfg.MaxBytes <= 0 {
+		cfg.MaxBytes = 25 * 1024 * 1024
+	}
 	if cfg.HotDays <= 0 {
 		cfg.HotDays = 7
 	}
@@ -109,11 +114,18 @@ func NewService(cfg Config) *Service {
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
+	if cfg.SF == nil {
+		cfg.SF = &singleflight.Group{}
+	}
+	if cfg.Sem == nil {
+		cfg.Sem = make(chan struct{}, 5)
+	}
 	return &Service{
 		dir:      cfg.Dir,
 		client:   &http.Client{Timeout: cfg.DownloadTimeout, Transport: transport},
 		maxFiles: cfg.MaxFiles,
 		maxAge:   time.Duration(cfg.MaxAgeHours) * time.Hour,
+		maxBytes: cfg.MaxBytes,
 		hotDays:  cfg.HotDays,
 		timeout:  cfg.DownloadTimeout,
 		ua:       cfg.UserAgent,
@@ -180,6 +192,12 @@ func (s *Service) Ensure(ctx context.Context, date, originURL string) {
 			imageDownloadTotal.WithLabelValues("error").Inc()
 			return nil, err
 		}
+		if resp.ContentLength > s.maxBytes {
+			err := fmt.Errorf("download image too large: %d bytes exceeds %d", resp.ContentLength, s.maxBytes)
+			l.Warn("download image too large", zap.Int64("content_length", resp.ContentLength), zap.Int64("max_bytes", s.maxBytes), zap.String("url", originURL))
+			imageDownloadTotal.WithLabelValues("error").Inc()
+			return nil, err
+		}
 
 		ext := ".jpg"
 		if exts, _ := mime.ExtensionsByType(resp.Header.Get("Content-Type")); len(exts) > 0 {
@@ -197,10 +215,19 @@ func (s *Service) Ensure(ctx context.Context, date, originURL string) {
 		tmp := tmpFile.Name()
 		finalPath := filepath.Join(s.dir, date+ext)
 
-		if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+		written, err := io.Copy(tmpFile, io.LimitReader(resp.Body, s.maxBytes+1))
+		if err != nil {
 			_ = tmpFile.Close()
 			_ = os.Remove(tmp)
 			l.Warn("write image failed", zap.Error(err), zap.String("path", tmp))
+			return nil, err
+		}
+		if written > s.maxBytes {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmp)
+			err := fmt.Errorf("download image too large: exceeded %d bytes", s.maxBytes)
+			l.Warn("download image too large", zap.Int64("written", written), zap.Int64("max_bytes", s.maxBytes), zap.String("url", originURL))
+			imageDownloadTotal.WithLabelValues("error").Inc()
 			return nil, err
 		}
 		if err := tmpFile.Close(); err != nil {
@@ -278,6 +305,17 @@ func (s *Service) Cleanup() {
 	if removedByAge > 0 || removedByCount > 0 {
 		s.logger.Info("image cache cleanup done", zap.Int("removed_by_age", removedByAge), zap.Int("removed_by_count", removedByCount), zap.Int("max_files", s.maxFiles), zap.Duration("max_age", s.maxAge))
 	}
+}
+
+// ServeCached serves an already cached image without triggering any upstream fetch.
+func (s *Service) ServeCached(c *gin.Context, date string) {
+	if p := s.localPath(date); p != "" {
+		imageCacheHitTotal.Inc()
+		c.File(p)
+		return
+	}
+	imageCacheMissTotal.Inc()
+	c.JSON(http.StatusNotFound, gin.H{"code": 404, "msg": "image not found"})
 }
 
 // Serve serves a cached image or downloads on-the-fly and serves it.

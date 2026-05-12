@@ -11,9 +11,10 @@ services:
     ports:
       - "8080:8080"
     environment:
+      APP_ENV: production
       GIN_MODE: release
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1,::1}
-      API_AUTH_KEY: ${API_AUTH_KEY:-changeme}
+      API_AUTH_KEY: ${API_AUTH_KEY:?API_AUTH_KEY is required}
       METRICS_AUTH_KEY: ${METRICS_AUTH_KEY:-}
       REDIS_ADDR: redis:6379
       REDIS_DB: "0"
@@ -26,6 +27,7 @@ services:
       MEMORY_CACHE_CLEANUP_MINUTES: ${MEMORY_CACHE_CLEANUP_MINUTES:-15}
       IMAGE_CACHE_MAX_FILES: ${IMAGE_CACHE_MAX_FILES:-1000}
       IMAGE_CACHE_MAX_AGE_HOURS: ${IMAGE_CACHE_MAX_AGE_HOURS:-720}
+      IMAGE_DOWNLOAD_MAX_BYTES: ${IMAGE_DOWNLOAD_MAX_BYTES:-26214400}
     volumes:
       - app_cache:/app/cache
     deploy:
