@@ -102,7 +102,7 @@ func rateLimitMiddleware(limiter *rate.Limiter) gin.HandlerFunc {
 
 // --- API Key Auth ---
 
-func apiKeyAuthMiddleware(requiredKey string, demoLimiter *cron.DemoIPLimiter) gin.HandlerFunc {
+func apiKeyAuthMiddleware(requiredKey string, allowDemoKey bool, demoLimiter *cron.DemoIPLimiter) gin.HandlerFunc {
 	requiredBytes := []byte(requiredKey)
 	return func(c *gin.Context) {
 		l := RequestLogger(c)
@@ -116,6 +116,12 @@ func apiKeyAuthMiddleware(requiredKey string, demoLimiter *cron.DemoIPLimiter) g
 		}
 
 		if mode == "demo" {
+			if !allowDemoKey {
+				l.Warn("auth failed", zap.String("method", c.Request.Method), zap.String("ip", ip), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusUnauthorized), zap.String("reason", "API key required"))
+				c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "API key required"})
+				c.Abort()
+				return
+			}
 			if demoLimiter != nil && !demoLimiter.Allow(ip) {
 				l.Warn("demo key quota exceeded", zap.String("method", c.Request.Method), zap.String("ip", ip), zap.String("path", c.Request.URL.Path), zap.Int("status", http.StatusTooManyRequests))
 				c.JSON(http.StatusTooManyRequests, gin.H{"code": 429, "msg": fmt.Sprintf("DEMO_KEY limit exceeded: %d requests per 24 hours for this IP", demoLimiter.Limit())})

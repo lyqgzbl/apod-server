@@ -10,7 +10,7 @@
 - 定时任务：每日预抓取 APOD，定期清理缓存
 - 可观测性：Prometheus 指标（需认证）、结构化日志、Trace ID
 - API 优化：Gzip、ETag（SHA-256）、Cache-Control、限流
-- 安全：Bearer Token 认证、常量时间密钥比较、DEMO_KEY IP 限流
+- 安全：Bearer Token 认证、常量时间密钥比较、生产默认关闭匿名 DEMO_KEY、DEMO_KEY IP 限流
 - 健康探针：healthz / readyz
 - 优雅关闭：HTTP Server + Cron 任务平滑退出
 
@@ -75,7 +75,7 @@ go run .
 
 ```bash
 curl -H 'Authorization: Bearer changeme' 'http://127.0.0.1:8080/v1/apod'
-curl 'http://127.0.0.1:8080/v1/apod' # 不带 Authorization 时自动使用 DEMO_KEY
+curl 'http://127.0.0.1:8080/v1/apod' # 开发环境默认允许，不带 Authorization 时自动使用 DEMO_KEY
 curl 'http://127.0.0.1:8080/healthz'
 curl 'http://127.0.0.1:8080/readyz'
 curl -H 'Authorization: Bearer your_metrics_key' 'http://127.0.0.1:8080/metrics'
@@ -95,6 +95,7 @@ docker build -t apod-server:latest -f deployments/Dockerfile .
 docker run --rm -p 8080:8080 \
 	-e NASA_API_KEY=your_api_key \
 	-e API_AUTH_KEY=your_app_api_key \
+	-e METRICS_AUTH_KEY=your_metrics_api_key \
 	-e REDIS_ADDR=host.docker.internal:6379 \
 	-v "$(pwd)/cache/images:/app/cache/images" \
 	--name apod-server apod-server:latest
@@ -108,7 +109,7 @@ docker run --rm -p 8080:8080 \
 ### 3. 使用 Docker Compose（推荐）
 
 ```bash
-API_AUTH_KEY=your_app_api_key NASA_API_KEY=your_nasa_api_key \
+API_AUTH_KEY=your_app_api_key METRICS_AUTH_KEY=your_metrics_api_key NASA_API_KEY=your_nasa_api_key \
 	docker compose -f deployments/docker-compose.yml up -d --build
 ```
 
@@ -151,7 +152,7 @@ API_AUTH_KEY=your_app_api_key NASA_API_KEY=your_api_key docker compose -f deploy
 - `GET /v1/apod?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`）
 - `GET /v1/apod/image?date=YYYY-MM-DD`（Header: `Authorization: Bearer YOUR_KEY`，兼容接口，302 跳转到静态图片）
 - `GET /static/apod/YYYY-MM-DD.jpg`（公开图片直链，只返回本地已缓存图片，不触发上游抓取）
-- `GET /metrics`（Header: `Authorization: Bearer METRICS_KEY`，独立认证，未配置 `METRICS_AUTH_KEY` 时使用 `API_AUTH_KEY`）
+- `GET /metrics`（Header: `Authorization: Bearer METRICS_KEY`，独立认证；生产环境必须单独配置 `METRICS_AUTH_KEY`）
 - `GET /healthz`
 - `GET /readyz`
 
@@ -181,11 +182,12 @@ API_AUTH_KEY=your_app_api_key NASA_API_KEY=your_api_key docker compose -f deploy
 - `APP_ENV`: 运行环境，`development` 或 `production`，默认 `development`
 - `LOG_LEVEL`: 日志级别，默认开发环境 `debug`，生产环境 `info`
 - `LOG_COLOR`: 控制台日志等级着色开关（`true/false`），默认自动检测终端
-- `TRUSTED_PROXIES`: 可信代理 IP 或 CIDR（逗号分隔）。仅来自这些代理的 `X-Forwarded-For`/`X-Real-IP`/`X-Forwarded-Host`/`X-Forwarded-Proto` 才会被信任。默认 `127.0.0.1,::1`
+- `TRUSTED_PROXIES`: 可信代理 IP 或 CIDR（逗号分隔）。仅来自这些代理的 `X-Forwarded-For`/`X-Real-IP`/`X-Forwarded-Host`/`X-Forwarded-Proto` 才会被信任。默认 `127.0.0.1,::1`；生产环境禁止配置为 `*`
 - `NASA_API_KEY`: NASA API Key，默认 `DEMO_KEY`
 - `API_AUTH_KEY`: 业务 API 访问密钥，默认 `changeme`
-- `METRICS_AUTH_KEY`: `/metrics` 端点独立访问密钥，未设置时回退到 `API_AUTH_KEY`；生产环境建议单独配置
-- `DEMO_KEY_LIMIT_PER_24H`: 未携带 Authorization 时（自动使用 `DEMO_KEY`）每个 IP 24 小时可调用 `/v1/apod` + `/v1/apod/image` 的 HTTP 200 响应总次数，默认 `5`
+- `METRICS_AUTH_KEY`: `/metrics` 端点独立访问密钥；开发环境未设置时回退到 `API_AUTH_KEY`，生产环境必须设置且不能与 `API_AUTH_KEY` 相同
+- `API_ALLOW_DEMO_KEY`: 是否允许未携带 Authorization 时自动使用 `DEMO_KEY` 访问 `/v1/apod` 与 `/v1/apod/image`。默认开发环境 `true`、生产环境 `false`
+- `DEMO_KEY_LIMIT_PER_24H`: 开启 `API_ALLOW_DEMO_KEY` 后，未携带 Authorization 的每个 IP 24 小时可调用 `/v1/apod` + `/v1/apod/image` 的 HTTP 200 响应总次数，默认 `5`
 - `API_RATE_LIMIT_RPS`: API 每秒令牌速率，默认 `8`
 - `API_RATE_LIMIT_BURST`: API 突发令牌桶容量，默认 `16`
 
@@ -268,6 +270,9 @@ curl -H 'Authorization: Bearer changeme' 'http://127.0.0.1:8080/v1/apod'
 - 使用真实 `NASA_API_KEY`，避免 `DEMO_KEY` 配额瓶颈
 - 生产环境启用 Redis
 - 生产环境务必设置 `API_AUTH_KEY` 为强密码（非 `changeme`）
+- 生产环境务必设置独立的 `METRICS_AUTH_KEY`，且不要与 `API_AUTH_KEY` 相同
+- 生产环境默认关闭匿名 `DEMO_KEY` 访问；如确需公开 demo，请显式设置 `API_ALLOW_DEMO_KEY=true` 并确认限流策略足够
+- 生产环境不要将 `TRUSTED_PROXIES` 设置为 `*`，否则客户端 IP 可被伪造并绕过基于 IP 的 demo 限流
 - 如在容器中运行，镜像可保持轻量，时区数据已通过 `time/tzdata` 内置
 - 前置网关可再叠加 IP 级限流
 - 服务支持 `SIGINT` / `SIGTERM` 优雅关闭，部署时可安全执行滚动更新

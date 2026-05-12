@@ -26,16 +26,17 @@ import (
 
 // ServerConfig holds all dependencies for the API server.
 type ServerConfig struct {
-	Fetch       *fetch.Service
-	Cache       store.Cache
-	KV          store.KVStore
-	Image       *image.Service
-	Logger      *zap.Logger
-	AuthKey     string
-	MetricsKey  string
-	DemoLimiter *cron.DemoIPLimiter
-	RateLimiter *rate.Limiter
-	Addr        string
+	Fetch        *fetch.Service
+	Cache        store.Cache
+	KV           store.KVStore
+	Image        *image.Service
+	Logger       *zap.Logger
+	AuthKey      string
+	MetricsKey   string
+	AllowDemoKey bool
+	DemoLimiter  *cron.DemoIPLimiter
+	RateLimiter  *rate.Limiter
+	Addr         string
 }
 
 // Server is the HTTP API server.
@@ -83,7 +84,7 @@ func (s *Server) setupRouter() *gin.Engine {
 	r.GET("/readyz", readinessHandler(cfg.KV, cfg.Image))
 	r.GET("/static/apod/:filename", staticImageHandler(cfg.Image))
 
-	authMW := apiKeyAuthMiddleware(cfg.AuthKey, cfg.DemoLimiter)
+	authMW := apiKeyAuthMiddleware(cfg.AuthKey, cfg.AllowDemoKey, cfg.DemoLimiter)
 	rateMW := rateLimitMiddleware(cfg.RateLimiter)
 	r.GET("/v1/apod", authMW, rateMW, apodHandler(cfg.Fetch))
 	r.GET("/v1/apod/image", authMW, rateMW, imageRedirectHandler(cfg.Fetch))

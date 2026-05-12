@@ -22,7 +22,9 @@ RUN apk add --no-cache ca-certificates curl && \
     addgroup -S app && adduser -S app -G app
 
 WORKDIR /app
-ENV IMAGE_CACHE_DIR=/app/cache/images
+ENV APP_ENV=production \
+    GIN_MODE=release \
+    IMAGE_CACHE_DIR=/app/cache/images
 
 COPY --from=builder /out/apod-server /app/apod-server
 RUN mkdir -p /app/cache/images && chown -R app:app /app

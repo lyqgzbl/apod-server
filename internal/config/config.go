@@ -51,6 +51,22 @@ func GetenvFloat64(key string, fallback float64) float64 {
 	return n
 }
 
+// GetenvBool returns the environment variable value as bool or fallback.
+func GetenvBool(key string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return fallback
+	}
+	switch v {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
 // AppEnv returns the current application environment name.
 func AppEnv() string {
 	env := strings.ToLower(strings.TrimSpace(Getenv("APP_ENV", "development")))

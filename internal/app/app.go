@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -21,19 +22,36 @@ import (
 // NewApp assembles all dependencies and returns a ready-to-run Server.
 // cronStop is a cleanup function that the caller should invoke on shutdown.
 func NewApp(logger *zap.Logger) (srv *api.Server, cronStop func(), err error) {
+	isProd := config.IsProdEnv()
+
 	// --- Auth keys ---
 	authKey := strings.TrimSpace(config.Getenv("API_AUTH_KEY", "changeme"))
 	if authKey == "changeme" {
-		if config.IsProdEnv() {
-			logger.Fatal("API_AUTH_KEY must be set in production", zap.String("current", "changeme"))
+		if isProd {
+			return nil, nil, fmt.Errorf("API_AUTH_KEY must be set in production")
 		} else {
 			logger.Warn("using default API_AUTH_KEY, please override in production")
 		}
 	}
 	metricsKey := strings.TrimSpace(config.Getenv("METRICS_AUTH_KEY", ""))
 	if metricsKey == "" {
+		if isProd {
+			return nil, nil, fmt.Errorf("METRICS_AUTH_KEY must be set in production")
+		}
 		metricsKey = authKey
 		logger.Warn("METRICS_AUTH_KEY not set, falling back to API_AUTH_KEY")
+	}
+	if isProd && metricsKey == authKey {
+		return nil, nil, fmt.Errorf("METRICS_AUTH_KEY must be different from API_AUTH_KEY in production")
+	}
+
+	trustedProxies := strings.TrimSpace(config.Getenv("TRUSTED_PROXIES", "127.0.0.1,::1"))
+	if isProd && hasTrustAllProxy(trustedProxies) {
+		return nil, nil, fmt.Errorf("TRUSTED_PROXIES must not contain * in production")
+	}
+	allowDemoKey := config.GetenvBool("API_ALLOW_DEMO_KEY", !isProd)
+	if isProd && allowDemoKey {
+		logger.Warn("API_ALLOW_DEMO_KEY is enabled in production; unauthenticated APOD requests are rate-limited but public")
 	}
 
 	// --- Shared transport ---
@@ -131,17 +149,27 @@ func NewApp(logger *zap.Logger) (srv *api.Server, cronStop func(), err error) {
 
 	// --- HTTP server ---
 	srv = api.NewServer(api.ServerConfig{
-		Fetch:       fetchSvc,
-		Cache:       memCache,
-		KV:          redisStore,
-		Image:       imgSvc,
-		Logger:      logger,
-		AuthKey:     authKey,
-		MetricsKey:  metricsKey,
-		DemoLimiter: demoLimiter,
-		RateLimiter: apiLimiter,
-		Addr:        ":8080",
+		Fetch:        fetchSvc,
+		Cache:        memCache,
+		KV:           redisStore,
+		Image:        imgSvc,
+		Logger:       logger,
+		AuthKey:      authKey,
+		MetricsKey:   metricsKey,
+		AllowDemoKey: allowDemoKey,
+		DemoLimiter:  demoLimiter,
+		RateLimiter:  apiLimiter,
+		Addr:         ":8080",
 	})
 
 	return srv, cronStop, nil
+}
+
+func hasTrustAllProxy(trustedProxies string) bool {
+	for _, proxy := range strings.Split(trustedProxies, ",") {
+		if strings.TrimSpace(proxy) == "*" {
+			return true
+		}
+	}
+	return false
 }
