@@ -15,6 +15,7 @@ func main() {
 	// for ConfigureGinMode and NewAppLogger.
 	envLoadErr := config.LoadDotEnv()
 
+	applog.PrintBanner()
 	applog.ConfigureGinMode()
 
 	logger, err := applog.NewAppLogger()
