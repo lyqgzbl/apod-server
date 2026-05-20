@@ -144,8 +144,38 @@ docker compose -f deployments/docker-compose.yml down -v
 示例：
 
 ```bash
-API_AUTH_KEY=your_app_api_key NASA_API_KEY=your_api_key docker compose -f deployments/docker-compose.yml up -d
+API_AUTH_KEY=your_app_api_key \
+METRICS_AUTH_KEY=your_metrics_api_key \
+GF_SECURITY_ADMIN_PASSWORD=your_grafana_password \
+NASA_API_KEY=your_api_key \
+docker compose -f deployments/docker-compose.yml up -d
 ```
+
+### 5. 观测 Web：Prometheus + Grafana
+
+Compose 会同时启动 Prometheus 和 Grafana：
+
+- Prometheus: `http://127.0.0.1:9090`
+- Grafana: `http://127.0.0.1:3000`
+
+启动完整观测栈：
+
+```bash
+API_AUTH_KEY=your_app_api_key \
+METRICS_AUTH_KEY=your_metrics_api_key \
+GF_SECURITY_ADMIN_PASSWORD=your_grafana_password \
+NASA_API_KEY=your_nasa_api_key \
+docker compose -f deployments/docker-compose.yml up -d --build
+```
+
+Grafana 默认账号由环境变量控制：
+
+- `GF_SECURITY_ADMIN_USER`: 默认 `admin`
+- `GF_SECURITY_ADMIN_PASSWORD`: 必须通过环境变量或项目根目录 `.env` 显式设置
+
+Prometheus 通过 `METRICS_AUTH_KEY` 抓取应用的受保护 `/metrics` 端点；该密钥会以 Bearer Token 方式传给 `http://app:8080/metrics`。Grafana 启动后会自动配置 Prometheus 数据源，并导入 `APOD Observability` 仪表盘。
+
+可在 Prometheus 的 `Status -> Target health` 页面确认 `apod-server` target 为 `UP`。触发几次业务请求后，Grafana 仪表盘会展示请求量、延迟、来源分布、缓存命中率、失败趋势与图片下载指标。
 
 ## 主要接口
 
@@ -155,6 +185,112 @@ API_AUTH_KEY=your_app_api_key NASA_API_KEY=your_api_key docker compose -f deploy
 - `GET /metrics`（Header: `Authorization: Bearer METRICS_KEY`，独立认证；生产环境必须单独配置 `METRICS_AUTH_KEY`）
 - `GET /healthz`
 - `GET /readyz`
+
+### `GET /v1/apod`
+
+返回 APOD 元数据。`date` 为空时返回 NASA 时区当天数据；当 `media_type` 为 `image` 时，`url` 会指向本服务缓存后的静态图片地址，`hdurl` 保留 NASA 原始图片地址。
+
+成功响应示例：
+
+```json
+{
+	"copyright": "NASA, ESA, CSA, STScI",
+	"date": "2026-04-01",
+	"explanation": "A brief description of the astronomy picture of the day.",
+	"hdurl": "https://apod.nasa.gov/apod/image/2604/example.jpg",
+	"media_type": "image",
+	"service_version": "v1",
+	"title": "Example Astronomy Picture",
+	"url": "https://apod.example.com/static/apod/2026-04-01.jpg"
+}
+```
+
+视频类 APOD 示例：
+
+```json
+{
+	"copyright": "",
+	"date": "2026-04-02",
+	"explanation": "A brief description of the astronomy video of the day.",
+	"media_type": "video",
+	"service_version": "v1",
+	"title": "Example Astronomy Video",
+	"url": "https://www.youtube.com/embed/example"
+}
+```
+
+上游或抓取失败时返回：
+
+```json
+{
+	"code": 502,
+	"msg": "upstream error message"
+}
+```
+
+### `GET /v1/apod/image`
+
+当 APOD 是图片时返回 `302 Found`，并通过 `Location` 跳转到本地静态图片。
+
+响应头示例：
+
+```http
+HTTP/1.1 302 Found
+Cache-Control: public, max-age=86400
+Location: /static/apod/2026-04-01.jpg
+```
+
+当 APOD 不是图片时返回：
+
+```json
+{
+	"code": 400,
+	"msg": "media type is not image"
+}
+```
+
+### `GET /healthz`
+
+健康检查成功响应：
+
+```json
+{
+	"status": "ok"
+}
+```
+
+### `GET /readyz`
+
+就绪检查成功响应：
+
+```json
+{
+	"fs": "ok",
+	"redis": "ok",
+	"status": "ready"
+}
+```
+
+依赖未就绪时返回 `503 Service Unavailable`：
+
+```json
+{
+	"fs": "ok",
+	"redis": "redis: nil",
+	"status": "not_ready"
+}
+```
+
+### 认证失败响应
+
+缺少或错误的业务 API Key 时返回：
+
+```json
+{
+	"code": 401,
+	"msg": "invalid API key"
+}
+```
 
 参数校验说明：
 
@@ -264,6 +400,14 @@ curl -H 'Authorization: Bearer changeme' 'http://127.0.0.1:8080/v1/apod'
 - `apod_fetch_fail_total`
 - `apod_parse_fail_total`
 - `apod_image_cache_hit_total`
+
+仓库提供了 Prometheus + Grafana 观测 Web 配置：
+
+- Prometheus 配置：`deployments/prometheus/prometheus.yml`
+- Grafana 数据源：`deployments/grafana/provisioning/datasources/prometheus.yml`
+- Grafana 仪表盘：`deployments/grafana/dashboards/apod-observability.json`
+
+`APOD Observability` 仪表盘会自动导入，覆盖请求量、请求延迟 P50/P95/P99、响应来源、缓存命中、失败趋势、图片缓存和图片下载耗时。
 
 ## 生产部署建议
 
