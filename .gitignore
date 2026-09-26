@@ -4,6 +4,7 @@
 
 *.jpg
 *.json
+!internal/fetch/testdata/*.json
 apod-server
 
 # IDE

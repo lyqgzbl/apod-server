@@ -2,17 +2,13 @@ package fetch
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	neturl "net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
@@ -109,19 +105,6 @@ func RequestDuration() *prometheus.HistogramVec { return apodRequestDuration }
 
 // SourceTotal returns the source counter.
 func SourceTotal() *prometheus.CounterVec { return apodSourceTotal }
-
-// --- NASA API response ---
-
-type nasaAPIResponse struct {
-	Date           string `json:"date"`
-	Title          string `json:"title"`
-	Copyright      string `json:"copyright"`
-	Explanation    string `json:"explanation"`
-	URL            string `json:"url"`
-	HDURL          string `json:"hdurl"`
-	MediaType      string `json:"media_type"`
-	ServiceVersion string `json:"service_version"`
-}
 
 type fetchResult struct {
 	apod   *model.APOD
@@ -232,6 +215,10 @@ func (s *Service) realFetchLogic(ctx context.Context, dateStr string, date time.
 		l.Warn("fetch web failed", zap.String("date", dateStr), zap.Error(err))
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, "canceled", err
+	}
+
 	if allowFallback {
 		if last := s.Cache.GetLast(); last != nil {
 			return last, "memory-fallback", nil
@@ -244,264 +231,4 @@ func (s *Service) realFetchLogic(ctx context.Context, dateStr string, date time.
 	apodFetchFailTotal.WithLabelValues("all").Inc()
 	l.Warn("all apod sources failed", zap.String("date", dateStr))
 	return nil, "failed", fmt.Errorf("all sources failed")
-}
-
-// --- NASA API fetch ---
-
-func (s *Service) fetchFromNASA(ctx context.Context, date string) (*model.APOD, error) {
-	l := applog.LoggerFromCtx(ctx)
-	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	if err := s.Limiter.Wait(fetchCtx); err != nil {
-		apodFetchFailTotal.WithLabelValues("nasa_limiter").Inc()
-		return nil, err
-	}
-
-	apiKey := s.NASAKey
-	if apiKey == "" {
-		apiKey = "DEMO_KEY"
-	}
-	url := fmt.Sprintf("https://api.nasa.gov/planetary/apod?api_key=%s&date=%s", neturl.QueryEscape(apiKey), date)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(fetchCtx)
-	req.Header.Set("User-Agent", s.UserAgent)
-
-	resp, err := s.HTTPClient.Do(req)
-	if err != nil {
-		apodFetchFailTotal.WithLabelValues("nasa").Inc()
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		apodFetchFailTotal.WithLabelValues("nasa").Inc()
-		return nil, fmt.Errorf("NASA API error: status %d", resp.StatusCode)
-	}
-
-	var result nasaAPIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	imgURL := strings.TrimSpace(result.URL)
-	apod := &model.APOD{
-		Date:           strings.TrimSpace(result.Date),
-		Title:          strings.TrimSpace(result.Title),
-		Copyright:      strings.TrimSpace(result.Copyright),
-		Explanation:    strings.TrimSpace(result.Explanation),
-		ImageURL:       imgURL,
-		OriginImage:    imgURL,
-		MediaType:      strings.TrimSpace(result.MediaType),
-		ServiceVersion: strings.TrimSpace(result.ServiceVersion),
-	}
-	if apod.ServiceVersion == "" {
-		apod.ServiceVersion = "v1"
-	}
-	if len(apod.Explanation) < 50 {
-		apodParseFailTotal.WithLabelValues("nasa").Inc()
-		l.Warn("invalid nasa payload", zap.String("date", date))
-		return nil, fmt.Errorf("invalid NASA data")
-	}
-	return apod, nil
-}
-
-// --- Web scrape fetch ---
-
-func (s *Service) fetchFromWeb(ctx context.Context, date time.Time) (*model.APOD, error) {
-	l := applog.LoggerFromCtx(ctx)
-	fetchCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-
-	pageURL := fmt.Sprintf("https://apod.nasa.gov/apod/ap%s.html", date.Format("060102"))
-	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(fetchCtx)
-	req.Header.Set("User-Agent", s.UserAgent)
-
-	resp, err := s.HTTPClient.Do(req)
-	if err != nil {
-		apodFetchFailTotal.WithLabelValues("web").Inc()
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		apodFetchFailTotal.WithLabelValues("web").Inc()
-		return nil, fmt.Errorf("web error: %d", resp.StatusCode)
-	}
-
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	apod := &model.APOD{Date: date.Format("2006-01-02")}
-	apod.Title = strings.TrimSpace(doc.Find("center b").First().Text())
-	apod.ImageURL, apod.MediaType = extractMedia(doc, pageURL)
-	apod.OriginImage = apod.ImageURL
-	apod.Copyright = extractCopyright(doc)
-	apod.Explanation = extractExplanation(doc)
-	apod.ServiceVersion = "v1"
-
-	if len(apod.Explanation) < 80 {
-		apodParseFailTotal.WithLabelValues("web").Inc()
-		l.Warn("parse apod page failed", zap.String("date", apod.Date))
-		return nil, fmt.Errorf("parse failed")
-	}
-	return apod, nil
-}
-
-// --- HTML parsers ---
-
-func extractMedia(doc *goquery.Document, pageURL string) (string, string) {
-	if img := doc.Find("center img").First(); img.Length() > 0 {
-		if src, ok := img.Attr("src"); ok {
-			return resolveMediaURL(pageURL, src), "image"
-		}
-	}
-	if iframe := doc.Find("iframe").First(); iframe.Length() > 0 {
-		if src, ok := iframe.Attr("src"); ok {
-			return resolveMediaURL(pageURL, src), "video"
-		}
-	}
-	return "", "other"
-}
-
-func resolveMediaURL(pageURL, raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	base, err := neturl.Parse(pageURL)
-	if err != nil {
-		return raw
-	}
-	ref, err := neturl.Parse(raw)
-	if err != nil {
-		return raw
-	}
-	return base.ResolveReference(ref).String()
-}
-
-func extractCopyright(doc *goquery.Document) string {
-	var result string
-	doc.Find("body *").EachWithBreak(func(_ int, s *goquery.Selection) bool {
-		text := strings.TrimSpace(s.Text())
-		if !strings.Contains(strings.ToLower(text), "copyright") {
-			return true
-		}
-		if c := parseCopyrightText(text); c != "" {
-			result = c
-			return false
-		}
-		if c := parseCopyrightText(s.Parent().Text()); c != "" {
-			result = c
-			return false
-		}
-		return true
-	})
-	if result != "" {
-		return result
-	}
-	for _, line := range strings.Split(doc.Find("body").Text(), "\n") {
-		if c := parseCopyrightText(line); c != "" {
-			return c
-		}
-	}
-	return ""
-}
-
-func parseCopyrightText(text string) string {
-	text = strings.TrimSpace(strings.ReplaceAll(text, "\r", " "))
-	text = strings.TrimSpace(strings.Join(strings.Fields(text), " "))
-	if text == "" {
-		return ""
-	}
-	lower := strings.ToLower(text)
-	idx := strings.Index(lower, "copyright")
-	if idx == -1 {
-		return ""
-	}
-	value := strings.TrimSpace(text[idx+len("copyright"):])
-	value = strings.TrimLeft(value, ":：- ")
-	if value == "" {
-		return ""
-	}
-	markers := []string{"explanation:", "tomorrow"}
-	for _, marker := range markers {
-		if cut := strings.Index(strings.ToLower(value), marker); cut != -1 {
-			value = strings.TrimSpace(value[:cut])
-		}
-	}
-	return value
-}
-
-func extractExplanation(doc *goquery.Document) string {
-	if exp := extractByKeyword(doc); exp != "" {
-		return exp
-	}
-	if exp := extractByLength(doc); exp != "" {
-		return exp
-	}
-	if exp := extractFallback(doc); exp != "" {
-		return exp
-	}
-	return ""
-}
-
-func extractByKeyword(doc *goquery.Document) string {
-	var result string
-	doc.Find("b").EachWithBreak(func(_ int, s *goquery.Selection) bool {
-		if !strings.Contains(s.Text(), "Explanation") {
-			return true
-		}
-		text := s.Parent().Text()
-		if idx := strings.Index(text, "Explanation:"); idx != -1 {
-			text = text[idx+len("Explanation:"):]
-		}
-		text = cleanText(text)
-		if len(text) > 100 {
-			result = text
-			return false
-		}
-		return true
-	})
-	return result
-}
-
-func extractByLength(doc *goquery.Document) string {
-	var best string
-	doc.Find("p").Each(func(_ int, s *goquery.Selection) {
-		text := cleanText(s.Text())
-		if len(text) > len(best) {
-			best = text
-		}
-	})
-	if len(best) > 120 {
-		return best
-	}
-	return ""
-}
-
-func extractFallback(doc *goquery.Document) string {
-	text := cleanText(doc.Text())
-	if len(text) > 200 {
-		return text
-	}
-	return ""
-}
-
-func cleanText(s string) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "\r", " ")
-	if idx := strings.Index(s, "Tomorrow"); idx != -1 {
-		s = s[:idx]
-	}
-	return strings.TrimSpace(strings.Join(strings.Fields(s), " "))
 }

@@ -5,6 +5,7 @@
 ## 特性
 
 - 多级缓存：内存缓存 + Redis 持久缓存
+- 数据源：NASA API 优先，NASA Science 新主站兜底，不再抓取旧版 APOD 网页
 - 缓存防击穿：singleflight 合并同 key 并发请求
 - 图片缓存：本地落盘，支持冷热分层清理
 - 定时任务：每日预抓取 APOD，定期清理缓存
@@ -38,7 +39,10 @@
 │   ├── image/
 │   │   └── service.go               # 图片服务：下载、缓存、服务、清理
 │   ├── fetch/
-│   │   ├── service.go               # 业务核心：GetAPOD、NASA API / Web 抓取、HTML 解析
+│   │   ├── service.go               # 抓取编排、缓存及降级
+│   │   ├── nasa.go                  # NASA APOD API
+│   │   ├── science.go               # NASA Science 新站文章查询
+│   │   ├── science_parse.go         # 新站正文、日期及媒体解析
 │   │   └── present.go               # API 输出：PresentAPOD
 │   └── server/
 │       ├── api/
@@ -62,6 +66,18 @@
 - **包职责单一**：HTTP 层（`server/api`）、定时任务（`server/cron`）、业务逻辑（`fetch`）、数据存储（`store`）、图片服务（`image`）各自独立
 - **Prometheus 指标各包自管**：`fetch` 和 `image` 包各自定义并注册指标，由 `app.NewApp()` 显式调用 `RegisterMetrics()`
 - **零环路依赖**：DAG 从 `main → app → server → fetch → store/image → model/config/log/httputil`
+
+### APOD 主站迁移
+
+数据读取顺序为：内存缓存 → Redis → NASA API → [NASA Science 新主站](https://science.nasa.gov/apod/) → 最近缓存（仅未指定日期时）。指定日期的上游数据不可用时返回错误，不返回其他日期的数据。
+
+主 API 使用 `https://science.nasa.gov/wp-json/wp/v2/apod-basic`，传递 `date` 和 `api_key`，继续使用 `NASA_API_KEY` 配置。兼容单对象及数组响应，数组中仅选取请求日期；未找到匹配记录时进入文章查询兜底。图片使用 `hdurl` 作为下载地址（新 API 的 `url` 可能是文章页），说明及版权中的 HTML 转为纯文本。不发送已停用的 `concept_tags`、`hd`、`thumbs` 参数。
+
+新站适配通过公开的 `/wp-json/wp/v2/image-article` 接口检索 APOD 日期短语，兼容日期补零与不补零的标题，并解析返回的文章 HTML。标题日期和正文日期均须匹配请求日期；正文、图片、视频和版权只从 APOD 内容区域提取，不使用全页文本兜底。日志和指标中的 `web` 来源现在表示 NASA Science。
+
+不再请求 `apod.nasa.gov` 的旧版日页面；NASA API 或已有缓存中的原始媒体地址仍按原值使用，不替换域名。现有 API 字段、图片缓存路径、Redis 格式和环境变量保持兼容，无需清空缓存。
+
+离线验证使用 `go test ./...` 和 `go test -race ./...`。可选的新站联网冒烟测试为 `APOD_LIVE_TEST=1 go test ./internal/fetch -run 'Test(NASA|Science)LiveSmoke' -v`，默认跳过，不影响离线测试。
 
 ### 2. 运行服务
 

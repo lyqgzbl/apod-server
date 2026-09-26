@@ -5,9 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
-	"github.com/PuerkitoBio/goquery"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
@@ -17,14 +17,15 @@ import (
 )
 
 type fakeKVStore struct {
-	last *model.APOD
+	last   *model.APOD
+	writes atomic.Int64
 }
 
 func (f *fakeKVStore) Get(string) *model.APOD {
 	return nil
 }
 
-func (f *fakeKVStore) Set(string, *model.APOD) {}
+func (f *fakeKVStore) Set(string, *model.APOD) { f.writes.Add(1) }
 
 func (f *fakeKVStore) GetLast() *model.APOD {
 	if f.last == nil {
@@ -100,33 +101,5 @@ func TestGetAPODInvalidDate(t *testing.T) {
 	}
 	if source != "invalid" {
 		t.Fatalf("expected source invalid, got %q", source)
-	}
-}
-
-func TestExtractMediaResolvesURLs(t *testing.T) {
-	tests := []struct {
-		name string
-		html string
-		want string
-	}{
-		{name: "relative", html: `<html><body><center><img src="image/foo.jpg"></center></body></html>`, want: "https://apod.nasa.gov/apod/image/foo.jpg"},
-		{name: "root", html: `<html><body><center><img src="/apod/image/foo.jpg"></center></body></html>`, want: "https://apod.nasa.gov/apod/image/foo.jpg"},
-		{name: "absolute", html: `<html><body><center><img src="https://cdn.example/foo.jpg"></center></body></html>`, want: "https://cdn.example/foo.jpg"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			doc, err := goquery.NewDocumentFromReader(strings.NewReader(tt.html))
-			if err != nil {
-				t.Fatalf("parse html: %v", err)
-			}
-			got, mediaType := extractMedia(doc, "https://apod.nasa.gov/apod/ap260101.html")
-			if mediaType != "image" {
-				t.Fatalf("media type = %q, want image", mediaType)
-			}
-			if got != tt.want {
-				t.Fatalf("url = %q, want %q", got, tt.want)
-			}
-		})
 	}
 }
